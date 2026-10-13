@@ -4,7 +4,7 @@ window.FISHBOWL_CONFIG = {
   // Leave blank to preview the page locally (nothing uploads).
   backendUrl: 'https://script.google.com/macros/s/AKfycbyzPXQtaSrPqD-aCRrBRdohDUbKbqV5lH9ggJsGscxa2Bl2AJagDjphDMtZSx7TnzWS/exec',
 
-  // Recording quality: 720p at about 2 Mbps. Roughly 15 MB per minute.
-  videoBitsPerSecond: 2000000,
-  audioBitsPerSecond: 128000,
+  // Recording quality: 720p at about 1.5 Mbps. Roughly 12 MB per minute of answer.
+  videoBitsPerSecond: 1500000,
+  audioBitsPerSecond: 96000,
 };

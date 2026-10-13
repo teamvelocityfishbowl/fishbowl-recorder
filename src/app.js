@@ -1,12 +1,13 @@
 /* Fishbowl Recorder
  * One question at a time: count-in → record (auto-stops at the time limit) → review → use take.
- * Each take uploads in the background, in pieces, to the Apps Script backend, which saves it to Drive.
+ * Each take uploads in the background. Fast path: the backend hands out a one-time Drive upload
+ * address and the video goes straight to Drive. Backup path: base64 pieces through the Apps Script backend.
  * No build step and no libraries: plain browser JavaScript.
  */
 (() => {
   'use strict';
 
-  const CFG = Object.assign({ backendUrl: '', videoBitsPerSecond: 2000000, audioBitsPerSecond: 128000 }, window.FISHBOWL_CONFIG || {});
+  const CFG = Object.assign({ backendUrl: '', videoBitsPerSecond: 1500000, audioBitsPerSecond: 96000 }, window.FISHBOWL_CONFIG || {});
   const params = new URLSearchParams(location.search);
   const TOKEN = (params.get('t') || '').trim();
   const PREVIEW = !CFG.backendUrl; // no backend configured → local preview, nothing uploads
@@ -19,7 +20,8 @@
     who: null, idx: 0, done: new Set(),
     stream: null, mime: '', ext: 'webm',
     rec: null, parts: [], blob: null, blobUrl: '', timers: [],
-    queue: [], uploading: false, uploadErr: '', savedCount: 0, waiters: [],
+    queue: [], uploading: false, uploadErr: '', savedCount: 0, waiters: [], pct: -1,
+    direct: null, // null = not tried yet, true = straight-to-Drive works here, false = use pieces
     photos: [], audioCtx: null, meterRaf: 0, screen: 'loading',
   };
 
@@ -102,6 +104,7 @@
     await sleep(action === 'chunk' ? 250 : 350);
     if (action === 'start') return { ok: true, name: 'Preview Tribute', first: 'there', demo: true, done: [], photos: 0, received: false };
     if (action === 'finish') return { ok: true, bytes: 0 };
+    if (action === 'direct') return { ok: false, error: 'Preview mode' };
     return { ok: true };
   }
 
@@ -138,6 +141,7 @@
         await uploadTake(item);
         S.queue.shift();
         S.savedCount++;
+        S.pct = -1;
         S.uploadErr = '';
       } catch (err) {
         S.uploadErr = err.message || String(err);
@@ -151,12 +155,59 @@
     S.waiters.splice(0).forEach((w) => w());
   }
 
-  async function uploadTake({ step, blob, mime, ext }) {
+  async function uploadTake(item) {
+    if (S.direct !== false && S.who && S.who.direct) {
+      try {
+        const r = await uploadDirect(item);
+        S.direct = true;
+        return r;
+      } catch (err) {
+        if (S.direct === true) throw err; // it worked before, so this is a hiccup: retry the fast path
+        S.direct = false;                 // never worked here (old backend, blocked network): use pieces
+        console.warn('[fishbowl] direct upload unavailable, using pieces:', err && err.message);
+      }
+    }
+    return uploadChunked(item);
+  }
+
+  async function uploadDirect({ step, blob, mime, ext }) {
+    const info = { stepId: step.id, title: step.file, mime, ext };
+    const s = await withRetry(() => api('direct', Object.assign({ size: blob.size, origin: location.origin }, info)), 2);
+    const file = await putToDrive(s.uploadUrl, blob, mime);
+    S.direct = true; // bytes reached Drive, so the fast path works on this network
+    return withRetry(() => api('saved', Object.assign({ fileId: file.id, totalSteps: S.steps.length }, info)));
+  }
+
+  function putToDrive(url, blob, mime) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', url);
+      xhr.setRequestHeader('Content-Type', (mime || 'video/webm').split(';')[0]);
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) { S.pct = Math.round((e.loaded / e.total) * 100); updatePill(); } };
+      xhr.onload = () => {
+        let json = null;
+        try { json = JSON.parse(xhr.responseText); } catch (e) {}
+        if (xhr.status >= 200 && xhr.status < 300 && json && json.id) resolve(json);
+        else reject(new Error('Drive responded ' + xhr.status));
+      };
+      xhr.onerror = () => reject(new Error('Upload blocked or offline'));
+      xhr.ontimeout = () => reject(new Error('Upload timed out'));
+      xhr.timeout = 10 * 60 * 1000;
+      xhr.send(blob);
+    });
+  }
+
+  async function uploadChunked({ step, blob, mime, ext }) {
     const b64 = await blobToBase64(blob);
     const total = Math.max(1, Math.ceil(b64.length / CHUNK));
     const uploadId = step.id + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
     const send = (i) => withRetry(() => api('chunk', { uploadId, index: i, total, data: b64.slice(i * CHUNK, (i + 1) * CHUNK) }));
-    for (let i = 0; i < total; i++) await send(i);
+    // up to 3 pieces at a time
+    const todo = [...Array(total).keys()];
+    let sent = 0;
+    await Promise.all(Array.from({ length: Math.min(3, total) }, async () => {
+      while (todo.length) { await send(todo.shift()); S.pct = Math.round((++sent / total) * 90); updatePill(); }
+    }));
     for (let attempt = 0; attempt < 4; attempt++) {
       const res = await withRetry(() => api('finish', {
         uploadId, total, stepId: step.id, title: step.file, mime, ext, totalSteps: S.steps.length,
@@ -177,7 +228,7 @@
     if (n) {
       pill.hidden = false;
       if (S.uploadErr) { pill.classList.add('err'); $('#uploadText').textContent = 'Connection hiccup, retrying…'; }
-      else $('#uploadText').textContent = `Saving ${n} answer${n > 1 ? 's' : ''}…`;
+      else $('#uploadText').textContent = `Saving ${n} answer${n > 1 ? 's' : ''}…` + (S.pct > 0 && S.pct < 100 ? ` ${S.pct}%` : '');
     } else if (S.savedCount) {
       pill.hidden = false;
       pill.classList.add('ok');

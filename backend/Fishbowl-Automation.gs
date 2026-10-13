@@ -1051,8 +1051,10 @@ function out_(s) { return ContentService.createTextOutput(s); }
 // The recording page (GitHub Pages) talks to this web app. Every request carries the
 // tribute's private token from their link; nothing is accepted without a valid one.
 //   start    → who they are + which answers are already saved (for resume)
-//   chunk    → one piece of an answer (base64 text), stored temporarily
-//   finish   → joins the pieces into "<NN Question>.<ext>" in their Drive folder
+//   direct   → fast path: a one-time Drive upload address; the page sends the video straight to Drive
+//   saved    → fast path: confirms that upload, replaces any older take, updates the tracker
+//   chunk    → backup path: one piece of an answer (base64 text), stored temporarily
+//   finish   → backup path: joins the pieces into "<NN Question>.<ext>" in their Drive folder
 //   photo    → one photo into their Photos folder
 //   complete → marks VIDEO RECEIVED ✅ and links their Drive folder in the sheet
 // ============================================================
@@ -1067,6 +1069,8 @@ function recorderApi_(body) {
       case 'start':    return json_(apiStart_(who));
       case 'chunk':    return json_(apiChunk_(who, body));
       case 'finish':   return json_(apiFinish_(who, body));
+      case 'direct':   return json_(apiDirect_(who, body));
+      case 'saved':    return json_(apiSaved_(who, body));
       case 'photo':    return json_(apiPhoto_(who, body));
       case 'complete': return json_(apiComplete_(who, body));
       default:         return json_({ ok: false, error: 'Unknown action' });
@@ -1147,7 +1151,7 @@ function apiStart_(who) {
     received = !!(r && r.get(COL.RECEIVED));
   }
   return { ok: true, name: who.name, first: who.first, demo: !!who.demo, done: done,
-           photos: who.demo ? 0 : photoCount_(folder), received: received, chunkChars: CHUNK_CHARS };
+           photos: who.demo ? 0 : photoCount_(folder), received: received, chunkChars: CHUNK_CHARS, direct: true };
 }
 
 function apiChunk_(who, b) {
@@ -1184,27 +1188,89 @@ function apiFinish_(who, b) {
   const blob = Utilities.newBlob(Utilities.base64Decode(b64), mime, stepId + ' ' + title + '.' + ext);
 
   const folder = personFolder_(who);
-  // Re-uploads replace the earlier take for the same question
-  const existing = folder.getFiles();
-  while (existing.hasNext()) {
-    const f = existing.next();
-    if (!f.isTrashed() && f.getName().indexOf(stepId + ' ') === 0) f.setTrashed(true);
-  }
   const file = folder.createFile(blob);
   parts.forEach(f => f.setTrashed(true));
-
-  if (!who.demo) {
-    const n = savedSteps_(folder).length;
-    const totalSteps = Number(b.totalSteps) || 16;
-    withSheetLock_(sh => {
-      const r = rows_(sh).find(x => x.row === who.row);
-      if (r && !r.get(COL.RECEIVED)) {
-        r.set(COL.STATUS, 'Recording ' + Math.min(n, totalSteps) + '/' + totalSteps);
-        if (!r.get(COL.FOLDER)) r.set(COL.FOLDER, folderLink_(folder));
-      }
-    });
-  }
+  trashOtherTakes_(folder, stepId, file.getId()); // a re-recorded answer replaces the earlier take
+  markProgress_(who, folder, b.totalSteps);
   return { ok: true, fileId: file.getId(), bytes: Math.floor(b64.length * 3 / 4) };
+}
+
+/**
+ * Fast path: asks Drive for a one-time upload address for this one answer, so the
+ * browser can send the video straight to Drive (no base64, no pieces through this script).
+ * The address only accepts this single file, into this person's folder.
+ */
+function apiDirect_(who, b) {
+  const v = takeInfo_(b);
+  const size = Number(b.size);
+  if (!(size > 0) || size > 1024 * 1024 * 1024) throw new Error('Bad size');
+  const origin = /^https?:\/\/[A-Za-z0-9.-]+(:\d+)?$/.test(b.origin || '') ? b.origin
+               : (String(CONFIG.RECORDER_URL).match(/^https?:\/\/[^/]+/) || [''])[0];
+  const folder = personFolder_(who);
+  const res = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size', {
+    method: 'post',
+    contentType: 'application/json; charset=UTF-8',
+    headers: {
+      Authorization: 'Bearer ' + ScriptApp.getOAuthToken(),
+      'X-Upload-Content-Type': v.mime,
+      'X-Upload-Content-Length': String(size),
+      Origin: origin, // lets the recorder page (and only that site) send the bytes
+    },
+    payload: JSON.stringify({ name: v.name, mimeType: v.mime, parents: [folder.getId()] }),
+    muteHttpExceptions: true,
+  });
+  const h = res.getAllHeaders();
+  const url = h.Location || h.location;
+  if (res.getResponseCode() !== 200 || !url) throw new Error('Drive upload unavailable (' + res.getResponseCode() + ')');
+  return { ok: true, uploadUrl: url };
+}
+
+/** Fast path, step 2: the browser finished sending; tidy up and update the tracker. */
+function apiSaved_(who, b) {
+  const v = takeInfo_(b);
+  const fileId = String(b.fileId || '').replace(/[^A-Za-z0-9_-]/g, '');
+  if (!fileId) throw new Error('Bad file');
+  const folder = personFolder_(who);
+  const file = DriveApp.getFileById(fileId);
+  let inFolder = false;
+  const ps = file.getParents();
+  while (ps.hasNext()) { if (ps.next().getId() === folder.getId()) inFolder = true; }
+  if (!inFolder || file.getName().indexOf(v.stepId + ' ') !== 0) throw new Error('Upload not found');
+  trashOtherTakes_(folder, v.stepId, fileId);
+  markProgress_(who, folder, b.totalSteps);
+  return { ok: true, fileId: fileId, bytes: file.getSize() };
+}
+
+/** Cleans the step id / title / type the page sends and builds "<id> <Title>.<ext>". */
+function takeInfo_(b) {
+  const stepId = String(b.stepId || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 4);
+  if (!stepId) throw new Error('Bad step');
+  const title = safeName_(b.title || stepId);
+  const ext = /^(mp4|webm|mov)$/.test(b.ext) ? b.ext : 'webm';
+  const mime = /^video\/(mp4|webm|quicktime)/.test(b.mime || '') ? String(b.mime).split(';')[0] : 'video/' + ext;
+  return { stepId: stepId, title: title, ext: ext, mime: mime, name: stepId + ' ' + title + '.' + ext };
+}
+
+function trashOtherTakes_(folder, stepId, keepId) {
+  const it = folder.getFiles();
+  while (it.hasNext()) {
+    const f = it.next();
+    if (!f.isTrashed() && f.getId() !== keepId && f.getName().indexOf(stepId + ' ') === 0) f.setTrashed(true);
+  }
+}
+
+/** Status → "Recording n/16" and links their folder (real tributes only). */
+function markProgress_(who, folder, totalSteps) {
+  if (who.demo) return;
+  const n = savedSteps_(folder).length;
+  const total = Number(totalSteps) || 16;
+  withSheetLock_(sh => {
+    const r = rows_(sh).find(x => x.row === who.row);
+    if (r && !r.get(COL.RECEIVED)) {
+      r.set(COL.STATUS, 'Recording ' + Math.min(n, total) + '/' + total);
+      if (!r.get(COL.FOLDER)) r.set(COL.FOLDER, folderLink_(folder));
+    }
+  });
 }
 
 function apiPhoto_(who, b) {
