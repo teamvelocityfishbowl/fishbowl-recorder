@@ -52,6 +52,14 @@
 
   $('.brand-bowl').style.backgroundImage = svgUrl(bowlSvg(0.55, '', { still: true }));
 
+  // Unmissable banner when the page isn't connected to the backend (nothing is saved)
+  if (PREVIEW) {
+    const bar = document.createElement('div');
+    bar.className = 'preview-bar';
+    bar.innerHTML = '⚠️ <b>PREVIEW MODE</b>: nothing you record is being saved. The backend URL is missing from src/config.js.';
+    document.body.prepend(bar);
+  }
+
   // ---------------------------------------------------------------- utils
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -572,6 +580,7 @@
       <h1>That's a wrap, ${esc(S.who.first || 'friend')}!</h1>
       <p class="lede">${already
         ? 'Your Fishbowl answers are already saved. Thanks again! If you need to change something, reply to your invite email.'
+        : PREVIEW ? '⚠️ Preview mode: this run was NOT saved anywhere. Connect the backend in src/config.js to save recordings.'
         : 'Your answers are saved and on their way to the Fishbowl team. Thanks for jumping in. Your coworkers are going to love it.'}</p>
       <p class="small">You can close this tab.</p></div>`);
     S.done = new Set(S.steps.map((s) => s.id));
