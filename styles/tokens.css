@@ -1,0 +1,22 @@
+/* Team Velocity × Fishbowl design tokens. See docs/DESIGN.md */
+:root {
+  --tv-navy: #082642;
+  --tv-navy-2: #0b2f50;
+  --tv-gradient: linear-gradient(160deg, #054f6a 0%, #082642 62%);
+  --tv-light-blue: #0090b2;
+  --tv-teal-blue: #156785;
+  --tv-light-gray: #f2f4f8;
+  --tv-dark-gray: #cccccc;
+  --tv-body: #333333;
+  --fb-card: linear-gradient(180deg, #15afb5 0%, #008eb0 100%);
+  --fb-teal: #15afb5;
+  --fb-splash: #4cd7fe;
+  --fb-water: #a0d3e5;
+  --rec: #e5484d;
+  --ok: #3ccf91;
+  --font-head: "Trebuchet MS", "Fira Sans", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Open Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  --stagger: 170ms;
+  --radius: 22px;
+}

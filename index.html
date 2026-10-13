@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#082642">
+  <title>The Fishbowl · Team Velocity</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='34' r='26' fill='%2315afb5'/%3E%3Ctext x='32' y='45' font-size='30' text-anchor='middle' fill='white' font-family='Trebuchet MS' font-weight='bold'%3E%3F%3C/text%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles/tokens.css">
+  <link rel="stylesheet" href="src/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-bowl" aria-hidden="true"></span><span>The Fishbowl</span></div>
+    <div class="progress" id="progress" hidden>
+      <span class="progress-label" id="progressLabel">1 of 16</span>
+      <span class="progress-bowl" id="progressBowl" aria-hidden="true"></span>
+    </div>
+  </header>
+
+  <main id="app" aria-live="polite">
+    <div class="screen center" data-screen="loading"><div class="spinner" aria-label="Loading"></div></div>
+  </main>
+
+  <div class="upload-pill" id="uploadPill" hidden>
+    <span class="dot"></span><span id="uploadText">Saving…</span>
+  </div>
+
+  <div class="rotate" id="rotate" hidden>
+    <div class="rotate-card">
+      <div class="rotate-phone" aria-hidden="true"></div>
+      <h2>Turn your phone sideways</h2>
+      <p>The Fishbowl is filmed in landscape. Rotate your phone to keep going.</p>
+    </div>
+  </div>
+
+  <footer class="footer">
+    <span class="tv-logo" aria-label="Team Velocity">Team&nbsp;Velocity</span>
+  </footer>
+
+  <script src="src/config.js"></script>
+  <script src="src/app.js"></script>
+</body>
+</html>
