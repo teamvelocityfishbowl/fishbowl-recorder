@@ -42,3 +42,6 @@ Open `index.html` through any local web server, e.g. `python3 -m http.server` in
 ## Brand assets to drop in
 - Replace the "Team Velocity" text in the footer (`index.html`, `.tv-logo`) with the official **white** TV logo SVG.
 - Optionally swap the drawn bowl for the official Fishbowl bowl icon.
+
+## Publishing changes
+After editing anything in `src/` or `styles/`, bump the `?v=` number on the four file links in `index.html` (e.g. `?v=20261013b` → `?v=20261020a`). Browsers then load the new files right away instead of a copy cached for up to 10 minutes.
