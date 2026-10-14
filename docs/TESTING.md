@@ -5,7 +5,7 @@
 - [x] 3‑2‑1 count-in, ring timer, auto-stop at the limit, early Stop, re-record
 - [x] Background upload in 4 MB pieces. A forced server error on one piece was retried automatically
 - [x] Resume: reload after 4 answers → "Hi again, Colin! You've saved 4 of 16" → continues at question 5
-- [x] Files saved as `Fishbowl 2027/Colin Knox/01 Intro.mp4 … Q10 Good Mood Song.mp4`, 1280×720, correct lengths. Temp pieces cleaned up
+- [x] Files saved as `Fishbowl 2027/01 January - Colin Knox/01 Intro.mp4 … Q10 Good Mood Song.mp4`, 1280×720, correct lengths. Temp pieces cleaned up
 - [x] Photos resized and saved to `Photos/`
 - [x] Sheet: Status *Recording n/16* → **Received ✅**, VIDEO RECEIVED date, 📁 folder link
 - [x] Invalid link → friendly error. Phone held upright → "Turn your phone sideways"

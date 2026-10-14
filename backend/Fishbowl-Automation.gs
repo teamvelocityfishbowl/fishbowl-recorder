@@ -7,30 +7,24 @@
  *
  * What it does:
  *   1. Sends each tribute an all-day "record your Fishbowl" calendar event on
- *      their recording day (Outlook-compatible), with their personal VideoAsk link.
+ *      their recording day (Outlook-compatible), with their personal recording link.
  *   2. Emails them the morning of their recording day.
  *   3. If the day passes with no video, nudges them every few business days
  *      (CCs their manager from the 2nd nudge, if a Manager Email is listed).
  *   4. After the last nudge, flags them "Needs a human" and emails you.
- *   5. When VideoAsk reports they've finished, marks VIDEO RECEIVED
- *      and stops all reminders.
+ *   5. Saves every answer to Drive (Fishbowl 2027/<Month> - <Name>/), shows progress
+ *      ("Recording 5/16"), and when they finish marks VIDEO RECEIVED and stops all reminders.
  */
 
 // ============ CONFIG: edit these ============
 const CONFIG = {
   SHEET_NAME: 'Sheet1',
 
-  // Which recorder the invite links open: 'custom' (our free Fishbowl Recorder) or 'videoask'.
-  RECORDER: 'custom',
-
   // The Fishbowl Recorder page on GitHub Pages (GitHub account: teamvelocityfishbowl).
   RECORDER_URL: 'https://teamvelocityfishbowl.github.io/fishbowl-recorder/',
 
   // Google Drive folder (in this account's Drive) where recordings are saved.
   DRIVE_FOLDER_NAME: 'Fishbowl 2027',
-
-  // Your VideoAsk share link (only used when RECORDER is 'videoask').
-  VIDEOASK_URL: 'https://www.videoask.com/fuusftovp', // The Fishbowl 2027 videoask
 
   // Who gets escalations + the Monday summary. Blank = the account running the script.
   ADMIN_EMAIL: 'teamvelocity.fishbowl@gmail.com',
@@ -40,7 +34,7 @@ const CONFIG = {
 
   // true = once automation is on, ticked rows (with Email + Record Date) are sent automatically
   // every ~10 min from the Fishbowl account, so editors signed into their own accounts can send.
-  // false = invites only go out when someone clicks 🐟 Fishbowl → 3. Send invites (Fishbowl account).
+  // false = invites only go out when someone clicks 🐟 Fishbowl → Send invites to ticked rows (Fishbowl account).
   AUTO_SEND_TICKED: false,
 
   // Nagging rules
@@ -51,9 +45,6 @@ const CONFIG = {
   // Hour (0-23) the daily check runs, in the script's time zone (Pacific).
   // 6 AM Pacific = 9 AM Eastern, so morning-of emails land at the start of the East Coast day.
   DAILY_CHECK_HOUR: 6,
-
-  // Any random string. It goes on the end of the webhook URL so only VideoAsk can mark rows.
-  WEBHOOK_KEY: 'change-me-to-a-random-string',
 
   // Optional extra line in every invite/reminder (e.g. a link to the question doc)
   EXTRA_NOTE: '',
@@ -83,7 +74,6 @@ const STATUS = {
   NOT_INVITED: 'Not invited',
   INVITED: 'Invited',
   DAY_OF: 'Day-of nudge sent',
-  STARTED: 'Started, not finished',
   NEEDS_HUMAN: 'Needs a human',
   RECEIVED: 'Received ✅',
 };
@@ -130,21 +120,21 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('🐟 Fishbowl')
     .addItem('➕ Add a new tribute…', 'showAddTribute')
+    .addItem('📨 Send invites to ticked rows', 'sendInvites')
     .addSeparator()
-    .addItem('1. Set up / restyle sheet', 'setupColumns')
-    .addItem('2. Send test invite + emails to me', 'sendTestToMe')
-    .addItem('3. Send invites to ticked rows', 'sendInvites')
+    .addItem('Show recording link for selected row', 'showSelectedLink')
+    .addItem('Mark selected row(s) as received', 'markSelectedReceived')
     .addSeparator()
     .addItem(CONFIG.AUTO_SEND_TICKED ? 'Turn on automation (auto-send + reminders)' : 'Turn on daily reminders', 'installDailyTrigger')
     .addItem('Turn off daily reminders', 'turnOffReminders')
     .addItem('Run reminder check now', 'runReminderCheckNow')
-    .addItem('Mark selected row(s) as received', 'markSelectedReceived')
-    .addItem('Show recording link for selected row', 'showSelectedLink')
     .addSeparator()
-    .addSubMenu(SpreadsheetApp.getUi().createMenu('🧪 Testing')
-      .addItem('Fast-forward selected row (next check sends next reminder)', 'testFastForwardSelected')
-      .addItem('Simulate VideoAsk finish for selected row', 'testSimulateWebhookSelected')
-      .addItem('Run diagnostics (email + calendar check)', 'testDiagnostics'))
+    .addSubMenu(SpreadsheetApp.getUi().createMenu('⚙️ Setup & troubleshooting')
+      .addItem('Set up / restyle sheet', 'setupColumns')
+      .addItem('Send test invite + emails to me', 'sendTestToMe')
+      .addItem('Run diagnostics (email + calendar check)', 'testDiagnostics')
+      .addSeparator()
+      .addItem('Test: make selected row due for its next reminder', 'testMakeDue'))
     .addToUi();
 }
 
@@ -237,9 +227,9 @@ function setupColumns() {
 
   // Notes on the headers
   sh.getRange(HR, c(COL.SEND)).setNote((CONFIG.AUTO_SEND_TICKED
-    ? 'Tick = invite them. Once automation is on, ticked rows (with an Email + Record Date) are sent from the Fishbowl account within ~10 minutes, whoever ticked them. Or send right away with 🐟 Fishbowl → 3. Send invites. Boxes clear once sent.'
-    : 'Tick the people to invite, then (signed in as the Fishbowl account) 🐟 Fishbowl → 3. Send invites to ticked rows. Nothing sends until then. Boxes clear once sent.'));
-  sh.getRange(HR, c(COL.STATUS)).setNote('Updated automatically.\n\n🟢 Green row = video received\n🟡 Yellow row = reminders going out / started but not finished\n🔴 Red row = got every reminder, needs a personal ping\n🔵 Blue status = invited, waiting for their recording day');
+    ? 'Tick = invite them. Once automation is on, ticked rows (with an Email + Record Date) are sent from the Fishbowl account within ~10 minutes, whoever ticked them. Or send right away with 🐟 Fishbowl → Send invites to ticked rows. Boxes clear once sent.'
+    : 'Tick the people to invite, then (signed in as the Fishbowl account) 🐟 Fishbowl → 📨 Send invites to ticked rows. Nothing sends until then. Boxes clear once sent.'));
+  sh.getRange(HR, c(COL.STATUS)).setNote('Updated automatically.\n\n🟢 Green row = video received\n🟡 Yellow row = reminders going out\n🔴 Red row = got every reminder, needs a personal ping\n🔵 Blue status = invited, waiting for their recording day');
   sh.getRange(HR, c(COL.DATE)).setNote('The day they should record. They get an all-day calendar event + a morning email that day, and can record anytime. Double-click a cell for a calendar. Leave it blank and Send will ask you for one date to use for everyone ticked.');
 
   // Status colors: status cell first (stronger), then the whole row (light tint)
@@ -249,7 +239,7 @@ function setupColumns() {
   const groups = [
     [THEME.RECEIVED, 'LEFT(@,8)="Received"'],
     [THEME.HUMAN,    'OR(@="' + STATUS.NEEDS_HUMAN + '",LEFT(@,13)="Invite failed")'],
-    [THEME.WAITING,  'OR(LEFT(@,8)="Reminder",LEFT(@,7)="Ticked:",@="' + STATUS.STARTED + '")'],
+    [THEME.WAITING,  'OR(LEFT(@,8)="Reminder",LEFT(@,7)="Ticked:")'],
     [THEME.INVITED,  'OR(@="' + STATUS.INVITED + '",@="' + STATUS.DAY_OF + '",LEFT(@,9)="Recording")'],
     [THEME.NOT_YET,  '@="' + STATUS.NOT_INVITED + '"'],
   ];
@@ -272,7 +262,7 @@ function setupColumns() {
   // Fill blank statuses
   rows_(sh).forEach(r => { if (!r.get(COL.STATUS)) r.set(COL.STATUS, STATUS.NOT_INVITED); });
 
-  toast_('Sheet is set up. Add emails, tick the people to invite, then 3. Send invites.');
+  toast_('Sheet is set up. Add emails, tick the people to invite, then 🐟 Fishbowl → Send invites to ticked rows.');
 }
 
 /**
@@ -333,7 +323,7 @@ function sendTestToMe() {
     results.push('✅ ' + (CONFIG.MAX_REMINDERS + 1) + ' sample emails handed to Google for delivery');
   } catch (err) { results.push('❌ Emails failed: ' + err.message); }
   ui.alert('Test sent to ' + me, results.join('\n') +
-    '\n\nIf it says ✅ but nothing arrives in Outlook within 5 minutes, run 🧪 Testing → Run diagnostics.',
+    '\n\nIf it says ✅ but nothing arrives in Outlook within 5 minutes, run ⚙️ Setup & troubleshooting → Run diagnostics.',
     ui.ButtonSet.OK);
 }
 
@@ -476,7 +466,7 @@ function addTribute(data) {
     if (dupe) return { ok: false, message: email + ' is already in the tracker (row ' + dupe.row + ').' };
 
     const map = headerMap_(sh);
-    if (map[norm_(COL.SEND)] === undefined) return { ok: false, message: 'Run "1. Set up / restyle sheet" first.' };
+    if (map[norm_(COL.SEND)] === undefined) return { ok: false, message: 'Run ⚙️ Setup & troubleshooting → Set up / restyle sheet first.' };
     const HR = headerRow_(sh);
     const row = (existing.length ? existing[existing.length - 1].row : HR) + 1;
     const width = sh.getLastColumn();
@@ -519,22 +509,40 @@ function createInvite_(p) {
 // Daily check: day-of nudge, reminders, escalation
 // ------------------------------------------------------------
 function dailyCheck() { stampHeartbeat_(); runCheck_(false); cleanupUploads_(); } // used by the daily trigger
-function runReminderCheckNow() { runCheck_(true); }  // menu: runs even on weekends
+function runReminderCheckNow() {          // menu: runs even on weekends, then shows what happened
+  if (!checkSender_()) return;
+  const report = runCheck_(true);
+  const ui = SpreadsheetApp.getUi();
+  const lines = [];
+  lines.push(report.sent.length ? '📨 Sent just now:' : '📭 No emails were due right now.');
+  report.sent.forEach(x => lines.push('   • ' + x));
+  if (report.waiting.length) { lines.push('', '⏳ Not due yet:'); report.waiting.forEach(x => lines.push('   • ' + x)); }
+  if (report.skipped.length) { lines.push('', '⏭️ Skipped:'); report.skipped.forEach(x => lines.push('   • ' + x)); }
+  lines.push('', 'Rules: morning-of email on their Record Date, then a nudge every ' + CONFIG.REMINDER_EVERY_BUSINESS_DAYS +
+    ' business days after it passes (manager CC\'d from nudge ' + CONFIG.CC_MANAGER_FROM_REMINDER + '), up to ' +
+    CONFIG.MAX_REMINDERS + ' nudges, then "Needs a human".');
+  ui.alert('🐟 Reminder check', lines.join('\n'), ui.ButtonSet.OK);
+}
 
+/** Checks every row and sends whatever is due. Returns what it did (shown by the menu version). */
 function runCheck_(manual) {
+  const report = { sent: [], waiting: [], skipped: [] };
   const now = new Date();
   const dow = now.getDay();
-  if (!manual && (dow === 0 || dow === 6)) return; // no weekend nagging
+  if (!manual && (dow === 0 || dow === 6)) return report; // no weekend nagging
 
   const sh = getSheet_();
   const escalated = [];
 
   rows_(sh).forEach(r => {
-    if (r.get(COL.RECEIVED) || !r.get(COL.SENT) || !r.get(COL.EMAIL)) return;
+    const who = String(r.get(COL.NAME) || '').trim() || ('Row ' + r.row);
+    if (r.get(COL.RECEIVED)) return;
+    if (!r.get(COL.SENT)) { if (r.get(COL.EMAIL)) report.skipped.push(who + ': not invited yet'); return; }
+    if (!r.get(COL.EMAIL)) { report.skipped.push(who + ': no Email'); return; }
     const day = dayOf_(r);
-    if (!day) return;
+    if (!day) { report.skipped.push(who + ': no Record Date'); return; }
     const status = String(r.get(COL.STATUS) || '');
-    if (status === STATUS.NEEDS_HUMAN) return;
+    if (status === STATUS.NEEDS_HUMAN) { report.skipped.push(who + ': already flagged "Needs a human"'); return; }
 
     const p = personFromRow_(r);
     const count = Number(r.get(COL.REMINDERS)) || 0;
@@ -546,26 +554,38 @@ function runCheck_(manual) {
       sendEmail_(p, 'dayof', 0, false);
       r.set(COL.LAST, now);
       r.set(COL.STATUS, STATUS.DAY_OF);
+      report.sent.push(who + ': morning-of email');
+      return;
+    }
+
+    if (now < dayEnd) {
+      report.waiting.push(who + (sameDay_(day, now)
+        ? ': today is their day (morning-of email already sent). First nudge ' + fmt_(addBusinessDays_(day, CONFIG.REMINDER_EVERY_BUSINESS_DAYS))
+        : ': recording day is ' + fmt_(day) + '. Morning-of email that day'));
       return;
     }
 
     // Their day has passed and still nothing
-    if (now >= dayEnd) {
-      const base = last && last > day ? last : day;
-      if (businessDaysBetween_(base, now) < CONFIG.REMINDER_EVERY_BUSINESS_DAYS) return;
-
-      if (count >= CONFIG.MAX_REMINDERS) {
-        r.set(COL.STATUS, STATUS.NEEDS_HUMAN);
-        escalated.push(p);
-        return;
-      }
-      const n = count + 1;
-      const cc = n >= CONFIG.CC_MANAGER_FROM_REMINDER && p.manager;
-      sendEmail_(p, 'reminder', n, cc);
-      r.set(COL.REMINDERS, n);
-      r.set(COL.LAST, now);
-      r.set(COL.STATUS, 'Reminder ' + n + ' sent');
+    const base = last && last > day ? last : day;
+    if (businessDaysBetween_(base, now) < CONFIG.REMINDER_EVERY_BUSINESS_DAYS) {
+      const nextDue = addBusinessDays_(base, CONFIG.REMINDER_EVERY_BUSINESS_DAYS);
+      report.waiting.push(who + ': ' + (count >= CONFIG.MAX_REMINDERS ? 'flags "Needs a human" ' : 'nudge ' + (count + 1) + ' due ') + fmt_(nextDue));
+      return;
     }
+
+    if (count >= CONFIG.MAX_REMINDERS) {
+      r.set(COL.STATUS, STATUS.NEEDS_HUMAN);
+      escalated.push(p);
+      report.sent.push(who + ': flagged "Needs a human" (you get an email)');
+      return;
+    }
+    const n = count + 1;
+    const cc = n >= CONFIG.CC_MANAGER_FROM_REMINDER && p.manager;
+    sendEmail_(p, 'reminder', n, cc);
+    r.set(COL.REMINDERS, n);
+    r.set(COL.LAST, now);
+    r.set(COL.STATUS, 'Reminder ' + n + ' sent');
+    report.sent.push(who + ': nudge ' + n + (cc ? ' (manager CC\'d)' : ''));
   });
 
   if (escalated.length) {
@@ -579,12 +599,35 @@ function runCheck_(manual) {
     });
   }
 
-  if (dow === 1) sendWeeklySummary_(sh);
-  if (manual) toast_('Reminder check done.');
+  if (dow === 1 && !manual) sendWeeklySummary_(sh);
+  return report;
+}
+
+/** The date n business days after d (skips weekends). */
+function addBusinessDays_(d, n) {
+  const x = new Date(d); x.setHours(0, 0, 0, 0);
+  while (n > 0) { x.setDate(x.getDate() + 1); if (x.getDay() !== 0 && x.getDay() !== 6) n--; }
+  return x;
+}
+
+/**
+ * For testing reminders: pretends the selected row's Record Date and last email were 5 days ago,
+ * so the next "Run reminder check now" sends the next step right away.
+ */
+function testMakeDue() {
+  const past = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+  const rows = selectedRows_().filter(r => r.get(COL.SENT) && !r.get(COL.RECEIVED));
+  if (!rows.length) { SpreadsheetApp.getUi().alert('Click an invited row (one with Request Sent filled in, not received yet) first.'); return; }
+  rows.forEach(r => {
+    const day = dayOf_(r);
+    if (!day || day > past) r.set(COL.DATE, new Date(past.getFullYear(), past.getMonth(), past.getDate()));
+    if (r.get(COL.LAST) instanceof Date) r.set(COL.LAST, past);
+  });
+  toast_(rows.length + ' row(s) moved back 5 days. Now click "Run reminder check now" to send the next step.');
 }
 
 // ------------------------------------------------------------
-// Testing helpers (safe to leave in; they only touch the selected row)
+// Selected-row helpers + troubleshooting
 // ------------------------------------------------------------
 function selectedRows_() {
   const sh = getSheet_();
@@ -593,17 +636,6 @@ function selectedRows_() {
   return rows_(sh).filter(r => r.row >= first && r.row < first + count);
 }
 
-/** Pushes the row's Record Date / last reminder 5 days into the past so the next check fires the next step. */
-function testFastForwardSelected() {
-  const past = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
-  const rows = selectedRows_();
-  rows.forEach(r => {
-    const day = dayOf_(r);
-    if (!day || day > past) r.set(COL.DATE, new Date(past.getFullYear(), past.getMonth(), past.getDate()));
-    if (r.get(COL.LAST) instanceof Date) r.set(COL.LAST, past);
-  });
-  toast_('Fast-forwarded ' + rows.length + ' row(s). Now click "Run reminder check now".');
-}
 
 /**
  * Explains where mail is (or isn't) going. Sends one plain email to the admin address AND to a
@@ -645,17 +677,6 @@ function testDiagnostics() {
   ui.alert('🐟 Fishbowl diagnostics', lines.join('\n'), ui.ButtonSet.OK);
 }
 
-/** Sends a fake "completed" VideoAsk webhook for the selected row(s), exactly like VideoAsk would. */
-function testSimulateWebhookSelected() {
-  const rows = selectedRows_();
-  rows.forEach(r => {
-    const payload = { event_type: 'form_response', contact: {
-      name: String(r.get(COL.NAME)), email: String(r.get(COL.EMAIL)), status: 'completed' } };
-    doPost({ parameter: { key: CONFIG.WEBHOOK_KEY, testRow: String(r.row) }, postData: { contents: JSON.stringify(payload) } });
-  });
-  getSheet_().activate();
-  toast_('Simulated VideoAsk finish for ' + rows.length + ' row(s). Check the Status column + "Webhook Log" tab.');
-}
 
 function sendWeeklySummary_(sh) {
   const all = rows_(sh);
@@ -666,7 +687,7 @@ function sendWeeklySummary_(sh) {
     '<p><b>' + received + ' of ' + all.length + '</b> fishbowls received.</p>' +
     '<p>Invited, waiting: ' + waiting.length +
     ' · In reminders: ' + count('Reminder') +
-    ' · Started, not finished: ' + count(STATUS.STARTED) +
+    ' · Recording now: ' + count('Recording') +
     ' · Needs a human: ' + count(STATUS.NEEDS_HUMAN) +
     ' · Not invited yet: ' + all.filter(r => !r.get(COL.SENT)).length + '</p>' +
     (waiting.length ? '<p>Still waiting on:</p><ul>' + waiting.map(r =>
@@ -705,7 +726,7 @@ function turnOffReminders() {
  * Lets anyone with edit access add people + tick Send? without sending from their own address.
  */
 function autoSendTicked() {
-  if (!CONFIG.AUTO_SEND_TICKED || !/^https?:\/\//.test(CONFIG.VIDEOASK_URL)) return;
+  if (!CONFIG.AUTO_SEND_TICKED) return;
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return;
   try {
@@ -735,64 +756,16 @@ function markSelectedReceived() {
 }
 
 // ------------------------------------------------------------
-// VideoAsk webhook: Deploy > Web app, then give VideoAsk:
-//   <web app URL>?key=<WEBHOOK_KEY>
+// Web app: the Fishbowl Recorder page talks to doPost (see RECORDER BACKEND below)
 // ------------------------------------------------------------
 function doPost(e) {
   let body;
   try { body = JSON.parse(e.postData.contents); } catch (err) { return out_('bad json'); }
-  if (body && body.action) return recorderApi_(body); // Fishbowl Recorder page (token-checked)
-  if (!e || !e.parameter || e.parameter.key !== CONFIG.WEBHOOK_KEY) return out_('forbidden');
-
-  const lock = LockService.getScriptLock();
-  lock.waitLock(20000);
-  try {
-    logWebhook_(body);
-    const evt = String(body.event_type || '');
-    if (evt && evt.indexOf('form_response') !== 0) return out_('ignored ' + evt);
-
-    const sh = getSheet_();
-    const rows = rows_(sh);
-    const emails = findEmails_(body);
-    const matches = rows.filter(r => emails.indexOf(String(r.get(COL.EMAIL) || '').trim().toLowerCase()) !== -1);
-    const testRow = Number(e.parameter.testRow) || 0; // only set by the Testing menu
-    const row = matches.find(r => r.row === testRow) || matches.find(r => !r.get(COL.RECEIVED)) || matches[0];
-    if (!row) return out_('no matching row');
-    if (row.get(COL.RECEIVED)) return out_('already received');
-
-    const status = String((body.contact && body.contact.status) || '').toLowerCase();
-    if (!status || status.indexOf('complet') !== -1) {
-      row.set(COL.RECEIVED, new Date());
-      row.set(COL.STATUS, STATUS.RECEIVED);
-    } else {
-      row.set(COL.STATUS, STATUS.STARTED);
-    }
-    return out_('ok');
-  } finally {
-    lock.releaseLock();
-  }
+  if (body && body.action) return recorderApi_(body); // token-checked
+  return out_('forbidden');
 }
 
 function doGet() { return out_('Fishbowl backend is live.'); }
-
-function logWebhook_(body) {
-  const ss = SpreadsheetApp.getActive();
-  let log = ss.getSheetByName('Webhook Log');
-  if (!log) {
-    const active = ss.getActiveSheet();
-    log = ss.insertSheet('Webhook Log', ss.getNumSheets()); // last tab
-    log.appendRow(['Received', 'Event', 'Email', 'VideoAsk status', 'Raw data (for troubleshooting)']);
-    log.getRange(1, 1, 1, 5).setBackground(THEME.NAVY).setFontColor('#FFFFFF').setFontWeight('bold');
-    log.setFrozenRows(1);
-    [150, 140, 260, 130, 500].forEach((w, k) => log.setColumnWidth(k + 1, w));
-    log.getRange('A:A').setNumberFormat('m/d/yyyy h:mm am/pm');
-    log.getRange('E:E').setWrap(false);
-    log.setTabColor('#8A97A0');
-    if (active) ss.setActiveSheet(active); // don't pull people off the tracker
-  }
-  log.appendRow([new Date(), body.event_type || '', findEmails_(body).join(', '),
-                 (body.contact && body.contact.status) || '', JSON.stringify(body).slice(0, 45000)]);
-}
 
 // ------------------------------------------------------------
 // Email copy
@@ -812,7 +785,7 @@ function inviteText_(p, link) {
     '• Splash Round = ONE-WORD answers. Save the stories for the later questions.',
     '• Have 3–6 photos ready to upload (family, pets, hobbies, anything fun).',
     '• It goes one question at a time, and you can re-record any answer before moving on.',
-    CONFIG.RECORDER === 'custom' ? '• Open the link in Chrome or Safari and allow your camera + microphone.' : null,
+    '• Open the link in Chrome or Safari and allow your camera + microphone.',
     CONFIG.EXTRA_NOTE ? '• ' + CONFIG.EXTRA_NOTE : null,
     '',
     "Busy that day? The link works anytime. Sooner is better!",
@@ -857,13 +830,9 @@ function sendEmail_(p, kind, n, ccManager) {
 // ------------------------------------------------------------
 // Helpers
 // ------------------------------------------------------------
-/** The link a tribute clicks to record. Custom recorder: a private token link. VideoAsk: prefilled contact. */
+/** The link a tribute clicks to record: the recorder page + their private token. */
 function personalLink_(p) {
-  if (CONFIG.RECORDER === 'custom') {
-    return String(CONFIG.RECORDER_URL).replace(/[?#].*$/, '').replace(/\/?$/, '/') + '?t=' + encodeURIComponent(p.token || DEMO_TOKEN);
-  }
-  const base = String(CONFIG.VIDEOASK_URL).split('#')[0];
-  return base + '#contact_name=' + encodeURIComponent(p.name) + '&contact_email=' + encodeURIComponent(p.email);
+  return String(CONFIG.RECORDER_URL).replace(/[?#].*$/, '').replace(/\/?$/, '/') + '?t=' + encodeURIComponent(p.token || DEMO_TOKEN);
 }
 
 /** Gives the row a private random token (once) for its recording link. */
@@ -885,7 +854,7 @@ function personFromRow_(r) {
     month: monthLabel_(r.get(COL.MONTH)),
     day: dayOf_(r),
     manager: String(r.get(COL.MANAGER) || '').trim(),
-    token: CONFIG.RECORDER === 'custom' ? ensureToken_(r) : '',
+    token: ensureToken_(r),
   };
 }
 
@@ -918,19 +887,6 @@ function businessDaysBetween_(a, b) {
     if (w !== 0 && w !== 6) n++;
   }
   return n;
-}
-
-function findEmails_(obj) {
-  const found = [];
-  const re = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-  (function walk(v) {
-    if (v == null) return;
-    if (typeof v === 'string') { (v.match(re) || []).forEach(m => found.push(decodeURIComponent(m).toLowerCase())); return; }
-    if (typeof v === 'object') Object.keys(v).forEach(k => walk(v[k]));
-  })(obj);
-  // contact.email first if present
-  const primary = obj && obj.contact && obj.contact.email ? [String(obj.contact.email).toLowerCase()] : [];
-  return primary.concat(found).filter((e, i, a) => a.indexOf(e) === i);
 }
 
 function sameDay_(a, b) {
@@ -1029,11 +985,7 @@ function checkSender_(silent) {
 }
 
 function checkConfig_() {
-  if (CONFIG.RECORDER === 'custom') {
-    if (/USERNAME/.test(CONFIG.RECORDER_URL)) throw new Error('Put your GitHub username into CONFIG.RECORDER_URL first.');
-    return;
-  }
-  if (!/^https?:\/\//.test(CONFIG.VIDEOASK_URL)) throw new Error('Paste your VideoAsk link into CONFIG.VIDEOASK_URL first.');
+  if (!/^https?:\/\//.test(CONFIG.RECORDER_URL)) throw new Error('Put the recorder page address into CONFIG.RECORDER_URL first.');
 }
 function adminEmail_() { return CONFIG.ADMIN_EMAIL || Session.getEffectiveUser().getEmail(); }
 function tz_() { return Session.getScriptTimeZone(); }
@@ -1085,13 +1037,14 @@ function whoIs_(token) {
   if (!token || token.length > 64) return null;
   if (token === DEMO_TOKEN) return { token: token, row: 0, name: 'Demo Tribute', first: 'there', demo: true };
   const cache = CacheService.getScriptCache();
-  const hit = cache.get('tok_' + token);
+  const hit = cache.get('who2_' + token);
   if (hit) return JSON.parse(hit);
   const r = rows_(getSheet_()).find(x => String(x.get(COL.TOKEN) || '').trim() === token);
   if (!r) return null;
   const name = String(r.get(COL.NAME) || '').trim();
-  const who = { token: token, row: r.row, name: name, first: name.split(/\s+/)[0] || 'there', demo: false };
-  cache.put('tok_' + token, JSON.stringify(who), 600);
+  const who = { token: token, row: r.row, name: name, first: name.split(/\s+/)[0] || 'there',
+                month: monthLabel_(r.get(COL.MONTH)), demo: false };
+  cache.put('who2_' + token, JSON.stringify(who), 600);
   return who;
 }
 
@@ -1110,10 +1063,34 @@ function childFolder_(parent, name) {
   return it.hasNext() ? it.next() : parent.createFolder(name);
 }
 
+/**
+ * Their folder: "Fishbowl 2027/01 January - Colin Knox". Remembered by link token, so if the
+ * Month or name changes later the same folder is just renamed (answers already saved stay put).
+ */
 function personFolder_(who) {
   const root = rootFolder_();
   if (who.demo) return childFolder_(childFolder_(root, '_Demo Recordings'), Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd'));
-  return childFolder_(root, safeName_(who.name));
+  const want = personFolderName_(who);
+  const props = PropertiesService.getScriptProperties();
+  const key = 'FOLDER_' + who.token;
+  let f = null;
+  const id = props.getProperty(key);
+  if (id) { try { f = DriveApp.getFolderById(id); if (f.isTrashed()) f = null; } catch (err) { f = null; } }
+  if (!f) {
+    const it = root.getFoldersByName(want);
+    const legacy = root.getFoldersByName(safeName_(who.name)); // folders made before months were added
+    f = it.hasNext() ? it.next() : legacy.hasNext() ? legacy.next() : root.createFolder(want);
+    props.setProperty(key, f.getId());
+  }
+  if (f.getName() !== want) f.setName(want);
+  return f;
+}
+
+function personFolderName_(who) {
+  const month = String(who.month || '').trim();
+  if (!month) return safeName_(who.name);
+  const i = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'].indexOf(month.slice(0, 3).toLowerCase());
+  return safeName_((i >= 0 ? ('0' + (i + 1)).slice(-2) + ' ' : '') + month + ' - ' + who.name);
 }
 
 function tempFolder_() { return childFolder_(rootFolder_(), '_uploads-in-progress'); }
@@ -1223,6 +1200,13 @@ function apiDirect_(who, b) {
   const url = h.Location || h.location;
   if (res.getResponseCode() !== 200 || !url) throw new Error('Drive upload unavailable (' + res.getResponseCode() + ')');
   return { ok: true, uploadUrl: url };
+}
+
+/** Run once from the editor after updating: approves the new permission and checks the fast upload path. */
+function checkFastUpload() {
+  const r = apiDirect_({ token: DEMO_TOKEN, demo: true, name: 'Demo Tribute' },
+    { stepId: '00', title: 'Upload Check', mime: 'video/mp4', ext: 'mp4', size: 1000 });
+  Logger.log(r.uploadUrl ? '✅ Fast uploads are ready.' : '❌ No upload address came back.');
 }
 
 /** Fast path, step 2: the browser finished sending; tidy up and update the tracker. */
