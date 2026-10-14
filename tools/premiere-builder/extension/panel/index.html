@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fishbowl Builder</title>
+<style>
+  :root {
+    --navy: #082642; --navy-2: #0e3256; --teal: #15afb5; --blue: #0090b2; --splash: #4cd7fe;
+    --ink: #e9f4f8; --quiet: #9fb6c4; --line: rgba(255,255,255,.12); --ok: #3ccf91; --warn: #ffb547; --bad: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--navy); color: var(--ink); font: 13px/1.45 "Open Sans", -apple-system, "Segoe UI", sans-serif; }
+  body { padding: 14px 14px 20px; }
+  h1 { font: 700 17px "Trebuchet MS", sans-serif; margin: 0 0 2px; display: flex; align-items: center; gap: 8px; }
+  .sub { color: var(--quiet); margin: 0 0 14px; font-size: 12px; }
+  .card { background: var(--navy-2); border-radius: 12px; padding: 12px; margin-bottom: 10px; box-shadow: inset 0 0 0 1px var(--line); }
+  .label { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--splash); margin-bottom: 6px; display: flex; justify-content: space-between; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .path { flex: 1; min-width: 0; color: var(--quiet); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .who { margin-top: 6px; font-size: 13px; }
+  .who b { color: #fff; }
+  .meta { color: var(--quiet); font-size: 12px; }
+  .warn { color: var(--warn); } .bad { color: var(--bad); } .good { color: var(--ok); }
+  button { border: 0; border-radius: 99px; padding: 7px 14px; font: 700 12px "Open Sans", sans-serif; cursor: pointer; color: #fff; background: rgba(255,255,255,.12); white-space: nowrap; }
+  button:hover:not(:disabled) { background: rgba(255,255,255,.2); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--blue); width: 100%; padding: 11px; font-size: 13px; letter-spacing: .04em; }
+  button.primary:hover:not(:disabled) { background: #00a3c9; }
+  button.link { background: none; color: var(--quiet); text-decoration: underline; padding: 4px; font-weight: 600; }
+  input[type=text] { width: 100%; background: rgba(0,0,0,.25); border: 1px solid var(--line); color: #fff; border-radius: 8px; padding: 7px 9px; font: 13px "Open Sans", sans-serif; }
+  input[type=text]:focus { outline: 2px solid var(--splash); border-color: transparent; }
+  #log { white-space: pre-wrap; font-size: 12px; color: var(--ink); margin-top: 10px; }
+  #log .h { font-weight: 700; color: #fff; }
+  .steps { margin: 0; padding-left: 18px; color: var(--quiet); font-size: 12px; }
+  .opt { display: block; margin: 4px 0 8px; line-height: 2; }
+  .opt input[type=checkbox] { vertical-align: middle; margin-right: 4px; accent-color: var(--blue); }
+  .opt input[type=number] { width: 52px; background: rgba(0,0,0,.25); border: 1px solid var(--line); color: #fff; border-radius: 6px; padding: 2px 4px; font: 12px "Open Sans", sans-serif; }
+  .foot { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+</style>
+</head>
+<body>
+  <h1>🐟 Fishbowl Builder</h1>
+  <p class="sub">Cuts both tributes' answers in after every question slide.</p>
+
+  <div class="card">
+    <div class="label"><span>1 · Template</span><button class="link" id="check">Check</button></div>
+    <div id="tpl" class="meta">Open the template sequence (Fishbowl-Month-Year-v01) in the timeline, then click Check.</div>
+  </div>
+
+  <div class="card">
+    <div class="label">2 · Tribute 1 (goes first)</div>
+    <div class="row"><button id="pick1">Choose folder</button><span class="path" id="path1">No folder yet</span></div>
+    <div class="who" id="who1"></div>
+  </div>
+
+  <div class="card">
+    <div class="label">3 · Tribute 2</div>
+    <div class="row"><button id="pick2">Choose folder</button><span class="path" id="path2">No folder yet</span></div>
+    <div class="who" id="who2"></div>
+  </div>
+
+  <div class="card">
+    <div class="label">4 · New sequence name</div>
+    <input type="text" id="seqName" value="Fishbowl-Month-Year-v01">
+  </div>
+
+  <div class="card">
+    <div class="label">5 · Clean up audio</div>
+    <label class="opt"><input type="checkbox" id="optTrim" checked> Cut dead air, keeping
+      <input type="number" id="padBefore" value="0.4" step="0.1" min="0" max="3"> s before and
+      <input type="number" id="padAfter" value="0.6" step="0.1" min="0" max="3"> s after</label>
+    <label class="opt"><input type="checkbox" id="optPauses" checked> Shorten pauses longer than
+      <input type="number" id="maxPause" value="0.8" step="0.1" min="0.5" max="5"> s</label>
+    <label class="opt"><input type="checkbox" id="optLevel" checked> Even out voices to
+      <input type="number" id="target" value="-16" step="1" min="-30" max="-8"> LUFS</label>
+    <div class="meta">Trims are just in/out points, so nothing is lost. −16 LUFS matches how you've mixed past Fishbowls over the −20 dB music bed.</div>
+  </div>
+
+  <button class="primary" id="build" disabled>Build sequence</button>
+  <div id="log"></div>
+
+  <div class="foot">
+    <button class="link" id="refresh" title="After someone re-records an answer and Drive syncs the new file">Refresh updated clips</button>
+    <span class="meta">v1.3</span>
+  </div>
+
+<script src="analyze.js"></script>
+<script src="main.js"></script>
+</body>
+</html>

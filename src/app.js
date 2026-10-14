@@ -418,7 +418,7 @@
     const limit = step.seconds;
     const hint = state === 'review'
       ? 'Happy with it? Use this take, or record it again.'
-      : splash ? `One word only. You've got ${limit} seconds!` : `You'll get a 3-2-1 countdown, then up to ${limit} seconds.`;
+      : splash ? `One word only. You've got ${limit} seconds!` : `Short and sweet: up to ${limit} seconds, after a 3-2-1 countdown.`;
     const el = show('question', `<div class="stage">
       <div class="camera" id="cam">
         <video id="live" autoplay muted playsinline></video>

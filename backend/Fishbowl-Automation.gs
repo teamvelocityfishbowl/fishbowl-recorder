@@ -23,6 +23,10 @@ const CONFIG = {
   // The Fishbowl Recorder page on GitHub Pages (GitHub account: teamvelocityfishbowl).
   RECORDER_URL: 'https://teamvelocityfishbowl.github.io/fishbowl-recorder/',
 
+  // This script's web app (Deploy → Manage deployments → Web app URL). Popups use it to send
+  // as the Fishbowl account even when Chrome runs them as another signed-in account.
+  WEB_APP_URL: 'https://script.google.com/macros/s/AKfycbyzPXQtaSrPqD-aCRrBRdohDUbKbqV5lH9ggJsGscxa2Bl2AJagDjphDMtZSx7TnzWS/exec',
+
   // Google Drive folder (in this account's Drive) where recordings are saved.
   DRIVE_FOLDER_NAME: 'Fishbowl 2027',
 
@@ -510,7 +514,7 @@ function addTribute(data) {
 function createInvite_(p) {
   const link = personalLink_(p);
   const ev = CalendarApp.getDefaultCalendar().createAllDayEvent(
-    '🐟 Fishbowl recording day (about 15 min)', p.day, {
+    '🐟 Fishbowl recording day (about 10 min)', p.day, {
       description: inviteText_(p, link),
       location: link,
       guests: p.email,
@@ -775,6 +779,7 @@ function markSelectedReceived() {
 function doPost(e) {
   let body;
   try { body = JSON.parse(e.postData.contents); } catch (err) { return out_('bad json'); }
+  if (body && body.action === 'redoRequest') return json_(webRedo_(body)); // one-time code from the menu
   if (body && body.action) return recorderApi_(body); // token-checked
   return out_('forbidden');
 }
@@ -789,7 +794,7 @@ function inviteText_(p, link) {
     'Hi ' + p.first + '!',
     '',
     "You're one of our Fishbowl tributes" + (p.month ? ' for ' + p.month : '') +
-      '. Your recording day is ' + dayPhrase_(p.day) + '. Find 15 minutes anytime, whatever works for you.',
+      '. Your recording day is ' + dayPhrase_(p.day) + '. Find 10 minutes anytime, whatever works for you.',
     '',
     '▶ RECORD HERE: ' + link,
     '',
@@ -817,16 +822,16 @@ function sendEmail_(p, kind, n, ccManager) {
   let subject, body;
   if (kind === 'dayof') {
     subject = '🐟 Today\'s your Fishbowl recording day!';
-    body = '<p>Hi ' + esc_(p.first) + ',</p><p>Today\'s your day to record your Fishbowl. Grab <b>15 minutes anytime today</b>. ' +
+    body = '<p>Hi ' + esc_(p.first) + ',</p><p>Today\'s your day to record your Fishbowl. Grab <b>10 minutes anytime today</b>. ' +
       'It goes one question at a time, and you can re-record any answer.</p>';
   } else if (n === 1) {
     subject = '🐟 Quick nudge: your Fishbowl recording';
     body = '<p>Hi ' + esc_(p.first) + ',</p><p>Looks like your Fishbowl day came and went. No worries! ' +
-      'The link still works anytime. Grab 15 minutes when you can:</p>';
+      'The link still works anytime. Grab 10 minutes when you can:</p>';
   } else if (n < CONFIG.MAX_REMINDERS) {
     subject = '🐟 Your Fishbowl is still waiting on you';
     body = '<p>Hi ' + esc_(p.first) + ',</p><p>Just checking in: we still need your Fishbowl recording' +
-      (p.month ? ' for the <b>' + esc_(p.month) + '</b> town hall' : '') + '. It only takes about 15 minutes.' +
+      (p.month ? ' for the <b>' + esc_(p.month) + '</b> town hall' : '') + '. It only takes about 10 minutes.' +
       (ccManager ? ' (Looping in your manager so they can help you carve out the time.)' : '') + '</p>';
   } else {
     subject = '🐟 Last call: Fishbowl recording';
@@ -1474,38 +1479,120 @@ function showRequestRedo() {
   if (!r.get(COL.SENT)) { ui.alert(r.get(COL.NAME) + ' hasn\'t been invited yet, so there\'s nothing to redo.'); return; }
   const p = personFromRow_(r);
   const steps = questionList_();
+
+  // Picks saved by the popup (it couldn't send because Chrome ran it as another account)? Send them now.
+  const cache = CacheService.getScriptCache();
+  const saved = cache.get('redoDraft_' + r.row);
+  if (saved) {
+    const d = JSON.parse(saved);
+    cache.remove('redoDraft_' + r.row);
+    const picked = steps.filter(st => d.ids.indexOf(st.id) !== -1).map(st => '• ' + st.id + ' ' + (st.file || st.text)).join('\n');
+    const go = ui.alert('Send redo request?', 'To ' + p.name + ' (' + p.email + '):\n\n' + picked +
+      (String(d.note || '').trim() ? '\n\nNote: ' + d.note : '') + '\n\nClick No to start over.', ui.ButtonSet.YES_NO);
+    if (go === ui.Button.YES) { const res = requestRedo(r.row, d.ids, d.note); if (!res.ok) ui.alert(res.message); return; }
+  }
+
   const takes = savedTakes_(personFolder_({ token: p.token, name: p.name, month: p.month }));
   const pending = redoList_({ token: p.token });
+  // One-time code: lets this popup ask the web app (which always runs as the Fishbowl account) to send.
+  const code = Utilities.getUuid();
+  cache.put('redoCode_' + code, String(r.row), 900);
   const items = steps.map(st => `<label class="q"><input type="checkbox" value="${esc_(st.id)}"${pending.indexOf(st.id) !== -1 ? ' checked' : ''}>
       <b>${esc_(st.id)}</b> ${esc_(st.file || st.text)}${takes[st.id] ? '' : ' <span class="none">(not recorded)</span>'}</label>`).join('');
   const html = `<!doctype html><html><head><base target="_top"><style>
     body{font-family:Roboto,Arial,sans-serif;margin:0;padding:16px 20px;color:${THEME.NAVY};font-size:14px}
     p{margin:0 0 10px;color:#5b6b75;font-size:13px}.list{max-height:260px;overflow:auto;border:1px solid #d5ecef;border-radius:8px;padding:6px 10px}
-    .q{display:flex;gap:8px;align-items:center;padding:5px 0}.q b{min-width:28px}.none{color:#8a97a0}
+    .q{display:flex;gap:8px;align-items:center;padding:5px 0}.q b{min-width:34px}.none{color:#8a97a0}
     textarea{width:100%;box-sizing:border-box;margin-top:10px;border:1px solid #c9dfe3;border-radius:8px;padding:8px;font:inherit;min-height:60px}
     .btns{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
     button{border:0;border-radius:20px;padding:9px 16px;font-size:14px;font-weight:700;cursor:pointer}
-    .go{background:${THEME.TEAL};color:#fff}.go:disabled{opacity:.6}.cancel{background:#eef5f6;color:${THEME.NAVY}}#msg{color:#b3261e;font-size:13px;margin-top:8px}
+    .go{background:${THEME.TEAL};color:#fff}.go:disabled{opacity:.6}.cancel{background:#eef5f6;color:${THEME.NAVY}}
+    #msg{font-size:13px;margin-top:8px}.err{color:#b3261e}
+    .next{background:#fff6dd;border:1px solid #ffe59a;border-radius:8px;padding:12px;margin-top:10px;font-size:14px;line-height:1.45}
   </style></head><body>
+    <div id="form">
     <p>Pick the answers ${esc_(p.first)} should re-record. They get an email with their link, and only these answers reopen if theirs are locked.</p>
     <div class="list">${items}</div>
     <textarea id="note" placeholder="Optional note to them, e.g. &quot;The end got cut off. Could you say it once more?&quot;"></textarea>
     <div id="msg"></div>
     <div class="btns"><button class="cancel" onclick="google.script.host.close()">Cancel</button><button class="go" id="go" onclick="send()">Send request</button></div>
+    </div>
     <script>
+      const RELAY=${JSON.stringify(CONFIG.WEB_APP_URL)}, CODE=${JSON.stringify(code)}, ROW=${r.row};
       function send(){
         const ids=[...document.querySelectorAll('input[type=checkbox]:checked')].map(x=>x.value);
+        const note=document.getElementById('note').value;
         const msg=document.getElementById('msg'),go=document.getElementById('go');
-        if(!ids.length){msg.textContent='Tick at least one answer.';return}
-        go.disabled=true;msg.textContent='';
-        google.script.run.withSuccessHandler(function(res){if(res.ok)google.script.host.close();else{go.disabled=false;msg.textContent=res.message}})
-          .withFailureHandler(function(e){go.disabled=false;msg.textContent=e.message}).requestRedo(${r.row}, ids, document.getElementById('note').value);
+        if(!ids.length){msg.className='err';msg.textContent='Tick at least one answer.';return}
+        go.disabled=true;msg.className='';msg.textContent='Sending…';
+        // 1) Through the web app: always sends as the Fishbowl account, whoever Chrome runs this popup as.
+        fetch(RELAY,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
+            body:JSON.stringify({action:'redoRequest',code:CODE,row:ROW,ids:ids,note:note}),redirect:'follow'})
+          .then(function(r){return r.json()})
+          .then(function(res){
+            if(res.ok){msg.textContent='Sent!';setTimeout(function(){google.script.host.close()},700);return}
+            if(res.expired){fallback(ids,note);return}
+            go.disabled=false;msg.className='err';msg.textContent=res.message||res.error||'Something went wrong.';
+          })
+          .catch(function(){fallback(ids,note)});
+      }
+      // 2) Backup: the old way (sends if this popup runs as Fishbowl, otherwise saves for one more menu click)
+      function fallback(ids,note){
+        const msg=document.getElementById('msg'),go=document.getElementById('go');
+        google.script.run.withSuccessHandler(function(res){
+            if(!res.ok){go.disabled=false;msg.className='err';msg.textContent=res.message;return}
+            if(res.sent){google.script.host.close();return}
+            document.getElementById('form').innerHTML='<div class="next"><b>One more click to send.</b><br>Your picks are saved: close this, then click <b>🐟 Fishbowl → 🔁 Request a redo</b> again (same row) to send them.</div>'+
+              '<div class="btns"><button class="go" onclick="google.script.host.close()">Close</button></div>';
+          })
+          .withFailureHandler(function(e){go.disabled=false;msg.className='err';msg.textContent=e.message}).submitRedo(ROW, ids, note);
       }
     </script></body></html>`;
-  ui.showModalDialog(HtmlService.createHtmlOutput(html).setWidth(460).setHeight(500), '🔁 Request a redo: ' + p.name);
+  ui.showModalDialog(HtmlService.createHtmlOutput(html).setWidth(460).setHeight(520), '🔁 Request a redo: ' + p.name);
 }
 
-/** Called by the dialog. Reopens those answers, updates the row, and emails the tribute. */
+/** Web app: a redo request from the menu's popup, checked against its one-time code. Runs as the Fishbowl account. */
+function webRedo_(b) {
+  const code = String(b.code || '').replace(/[^A-Za-z0-9-]/g, '');
+  const cache = CacheService.getScriptCache();
+  const row = code ? cache.get('redoCode_' + code) : null;
+  if (!row) return { ok: false, expired: true, message: 'This popup expired. Close it and choose Request a redo again.' };
+  if (Number(row) !== Number(b.row)) return { ok: false, message: 'Row mismatch. Close this and try again.' };
+  const ids = (Array.isArray(b.ids) ? b.ids : []).map(x => String(x).replace(/[^A-Za-z0-9]/g, '').slice(0, 4));
+  const res = requestRedo(Number(row), ids, String(b.note || '').slice(0, 1000));
+  if (res.ok) cache.remove('redoCode_' + code);
+  return res;
+}
+
+/**
+ * Called by the popup. Sends right away when the popup runs as the Fishbowl account; otherwise
+ * (Chrome ran it as another signed-in account) saves the picks for 10 minutes so the menu can send them.
+ */
+function submitRedo(row, ids, note) {
+  const sender = PropertiesService.getScriptProperties().getProperty('SENDER');
+  const me = Session.getEffectiveUser().getEmail();
+  if (!sender || norm_(me) === norm_(sender)) {
+    const res = requestRedo(row, ids, note);
+    return Object.assign({ sent: !!res.ok }, res);
+  }
+  CacheService.getScriptCache().put('redoDraft_' + Number(row), JSON.stringify({ ids: ids, note: String(note || '') }), 600);
+  return { ok: true, sent: false, as: me || 'another account' };
+}
+
+/** "01, s5, q3" → ["01","S5","Q03"] (+ anything it couldn't match). */
+function parseStepIds_(text, steps) {
+  const known = steps.map(st => st.id);
+  const ok = [], bad = [];
+  String(text || '').split(/[\s,;]+/).map(x => x.trim()).filter(Boolean).forEach(x => {
+    let id = x.toUpperCase();
+    if (/^(INTRO|1|0?1)$/.test(id)) id = '01';
+    const m = id.match(/^Q(\d)$/); if (m) id = 'Q0' + m[1];
+    if (known.indexOf(id) !== -1) { if (ok.indexOf(id) === -1) ok.push(id); } else bad.push(x);
+  });
+  return { ok: ok, bad: bad };
+}
+
+/** Reopens those answers, updates the row, and emails the tribute. */
 function requestRedo(row, ids, note) {
   checkSender_(true);
   const steps = questionList_();
@@ -1529,7 +1616,7 @@ function requestRedo(row, ids, note) {
       (String(note || '').trim() ? '<p>' + esc_(String(note).trim()) + '</p>' : '') +
       '<p><a href="' + link + '" style="background:#14a3a8;color:#fff;padding:12px 22px;border-radius:24px;text-decoration:none;font-weight:bold;display:inline-block">▶ Open my Fishbowl</a></p>' +
       '<p style="color:#555;font-size:13px">Your link opens right to ' + (pick.length > 1 ? 'them' : 'it') + '. Everything else you recorded stays as is.</p>' });
-  toast_('Redo request sent to ' + p.name + '.');
+  try { toast_('Redo request sent to ' + p.name + '.'); } catch (e) { /* no toast from the web app */ }
   return { ok: true };
 }
 
