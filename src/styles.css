@@ -227,3 +227,42 @@ p { margin: 0; }
 }
 
 .preview-bar { background: #ffe59a; color: #082642; text-align: center; padding: 10px 16px; font-size: 14px; position: sticky; top: 0; z-index: 60; }
+
+/* ---------- All questions ---------- */
+.top-btn {
+  margin-left: auto; margin-right: 16px; background: rgba(255,255,255,.1); color: #fff; border: 0; border-radius: 99px;
+  padding: 9px 16px; font: 600 14px var(--font-body); cursor: pointer; box-shadow: inset 0 0 0 1.5px rgba(255,255,255,.25);
+}
+.top-btn:hover { background: rgba(255,255,255,.18); }
+.top-btn:focus-visible { outline: 3px solid var(--fb-splash); outline-offset: 2px; }
+.overview { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; padding-bottom: 4vh; }
+.ov-head { display: flex; flex-direction: column; gap: 8px; }
+.ov-head.done { gap: 12px; padding: 1vh 0 0; }
+.small-burst { width: clamp(110px, 14vw, 150px); }
+.notice.ask { max-width: none; background: rgba(76,215,254,.12); box-shadow: inset 0 0 0 1px rgba(76,215,254,.5); }
+.ov-list { display: flex; flex-direction: column; gap: 8px; }
+.ov-group { font-family: var(--font-head); font-size: 15px; letter-spacing: .08em; text-transform: uppercase; color: var(--fb-water); margin: 14px 0 2px; }
+.ov-row {
+  display: grid; grid-template-columns: 54px minmax(0, 1fr) auto auto; align-items: center; gap: 14px;
+  background: rgba(255,255,255,.06); border-radius: 14px; padding: 12px 14px;
+}
+.ov-row.ask { box-shadow: inset 0 0 0 2px var(--fb-splash); background: rgba(76,215,254,.1); }
+.ov-tag { font-family: var(--font-head); font-weight: 700; font-size: 15px; color: var(--fb-splash); }
+.ov-text { font-size: 15px; color: #fff; }
+.ov-state { font-size: 13px; color: rgba(255,255,255,.6); white-space: nowrap; }
+.ov-row.saved .ov-state { color: var(--ok); }
+.ov-row.ask .ov-state { color: var(--fb-splash); font-weight: 700; }
+.ov-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.btn-small { min-height: 38px; padding: 0 16px; font-size: 13px; letter-spacing: .06em; }
+.ov-foot { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 6px; }
+.player { position: fixed; inset: 0; z-index: 70; background: rgba(4,24,43,.82); display: grid; place-items: center; padding: 16px; }
+.player-card { width: min(920px, 100%); background: var(--tv-navy); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.45); }
+.player-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-weight: 600; }
+.player-body { aspect-ratio: 16 / 9; background: #04182b; border-radius: 14px; overflow: hidden; display: grid; place-items: center; gap: 10px; align-content: center; }
+.player-body video { width: 100%; height: 100%; object-fit: contain; display: block; }
+@media (max-width: 640px) {
+  .ov-row { grid-template-columns: 40px minmax(0, 1fr); }
+  .ov-state { grid-column: 2; }
+  .ov-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .top-btn { padding: 8px 12px; font-size: 13px; margin-right: 10px; }
+}

@@ -124,6 +124,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Show recording link for selected row', 'showSelectedLink')
     .addItem('Mark selected row(s) as received', 'markSelectedReceived')
+    .addItem('🔁 Request a redo for selected row…', 'showRequestRedo')
     .addSeparator()
     .addItem(CONFIG.AUTO_SEND_TICKED ? 'Turn on automation (auto-send + reminders)' : 'Turn on daily reminders', 'installDailyTrigger')
     .addItem('Turn off daily reminders', 'turnOffReminders')
@@ -143,6 +144,12 @@ function onOpen() {
 // ------------------------------------------------------------
 function setupColumns() {
   if (!checkSender_()) return;
+  styleSheet_();
+  toast_('Sheet is set up. Add emails, tick the people to invite, then 🐟 Fishbowl → Send invites to ticked rows.');
+}
+
+/** Columns, colors, checkboxes and the banner, for everyone listed + 25 spare rows. Safe to re-run. */
+function styleSheet_() {
   const sh = getSheet_();
   const ss = SpreadsheetApp.getActive();
   ss.setSpreadsheetTimeZone(tz_()); // keep sheet + script clocks in sync
@@ -171,8 +178,9 @@ function setupColumns() {
 
   // Size of the styled area: everyone listed + 25 spare rows
   const named = rows_(sh);
-  const lastRow = (named.length ? named[named.length - 1].row : HR) + 25;
+  const lastRow = (named.length ? named[named.length - 1].row : HR) + SPARE_ROWS;
   if (sh.getMaxRows() < lastRow) sh.insertRowsAfter(sh.getMaxRows(), lastRow - sh.getMaxRows());
+  PropertiesService.getScriptProperties().setProperty('STYLED_TO', String(lastRow));
   const first = HR + 1;
   const n = lastRow - HR;
   const width = LAYOUT.length;
@@ -239,7 +247,7 @@ function setupColumns() {
   const groups = [
     [THEME.RECEIVED, 'LEFT(@,8)="Received"'],
     [THEME.HUMAN,    'OR(@="' + STATUS.NEEDS_HUMAN + '",LEFT(@,13)="Invite failed")'],
-    [THEME.WAITING,  'OR(LEFT(@,8)="Reminder",LEFT(@,7)="Ticked:")'],
+    [THEME.WAITING,  'OR(LEFT(@,8)="Reminder",LEFT(@,7)="Ticked:",LEFT(@,4)="Redo")'],
     [THEME.INVITED,  'OR(@="' + STATUS.INVITED + '",@="' + STATUS.DAY_OF + '",LEFT(@,9)="Recording")'],
     [THEME.NOT_YET,  '@="' + STATUS.NOT_INVITED + '"'],
   ];
@@ -261,9 +269,9 @@ function setupColumns() {
 
   // Fill blank statuses
   rows_(sh).forEach(r => { if (!r.get(COL.STATUS)) r.set(COL.STATUS, STATUS.NOT_INVITED); });
-
-  toast_('Sheet is set up. Add emails, tick the people to invite, then 🐟 Fishbowl → Send invites to ticked rows.');
 }
+
+const SPARE_ROWS = 25; // styled empty rows kept below the last person
 
 /**
  * Row 1 banner. A1:B1 = title, C1:(Last Reminder)1 = live status, built from a formula so it
@@ -426,9 +434,9 @@ function showAddTribute() {
     <label>Manager email <span>(optional, CC'd from reminder ${CONFIG.CC_MANAGER_FROM_REMINDER})</span></label>
     <input id="manager" type="email">
     <div class="row">
-      <div><label>Month <span>(optional)</span></label><select id="month"><option value=""></option>
+      <div><label>Month <span>(town hall it airs at)</span></label><select id="month"><option value=""></option>
         ${MONTHS.map(m => `<option>${m}</option>`).join('')}</select></div>
-      <div><label>Record date <span>(optional)</span></label><input id="date" type="date"></div>
+      <div><label>Record date</label><input id="date" type="date"></div>
     </div>
     <div id="msg"></div>
     <div class="btns"><button class="cancel" onclick="google.script.host.close()">Cancel</button>
@@ -438,7 +446,8 @@ function showAddTribute() {
     function submitForm(){
       const msg=document.getElementById('msg'), go=document.getElementById('go');
       const data={name:v('name'),email:v('email'),manager:v('manager'),month:v('month'),date:v('date')};
-      if(!data.name||!data.email){msg.className='err';msg.textContent='Name and work email are required.';return}
+      const missing=[['name','Name'],['email','Work email'],['month','Month'],['date','Record date']].filter(f=>!data[f[0]]).map(f=>f[1]);
+      if(missing.length){msg.className='err';msg.textContent='Please fill in: '+missing.join(', ')+'.';return}
       go.disabled=true;msg.className='';msg.textContent='Adding…';
       google.script.run
         .withSuccessHandler(function(res){if(res.ok){google.script.host.close()}else{go.disabled=false;msg.className='err';msg.textContent=res.message}})
@@ -456,6 +465,7 @@ function addTribute(data) {
   const name = String(data.name || '').trim();
   const email = String(data.email || '').trim();
   if (!name || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, message: 'Please enter a name and a valid email.' };
+  if (!data.month || !/^\d{4}-\d{2}-\d{2}$/.test(String(data.date || ''))) return { ok: false, message: 'Please pick a Month and a Record date.' };
 
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
@@ -469,6 +479,7 @@ function addTribute(data) {
     if (map[norm_(COL.SEND)] === undefined) return { ok: false, message: 'Run ⚙️ Setup & troubleshooting → Set up / restyle sheet first.' };
     const HR = headerRow_(sh);
     const row = (existing.length ? existing[existing.length - 1].row : HR) + 1;
+    if (row > sh.getMaxRows()) sh.insertRowsAfter(sh.getMaxRows(), SPARE_ROWS);
     const width = sh.getLastColumn();
     if (row > HR + 1) sh.getRange(row - 1, 1, 1, width).copyTo(sh.getRange(row, 1, 1, width), SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
     const sendCell = sh.getRange(row, map[norm_(COL.SEND)] + 1);
@@ -483,6 +494,9 @@ function addTribute(data) {
     if (data.date) { const [y, m, d] = String(data.date).split('-').map(Number); put(COL.DATE, new Date(y, m - 1, d)); }
     put(COL.STATUS, STATUS.NOT_INVITED);
     SpreadsheetApp.flush();
+    // Running low on styled rows? Extend the styling (checkboxes, colors) another 25 rows.
+    const styledTo = Number(PropertiesService.getScriptProperties().getProperty('STYLED_TO')) || 0;
+    if (row > styledTo - 5) { styleSheet_(); SpreadsheetApp.flush(); }
 
     const note = 'Added ' + name + ' (row ' + row + '). Tick Send? when you\'re ready to invite them.';
     sh.setActiveRange(sh.getRange(row, map[norm_(COL.NAME)] + 1));
@@ -508,7 +522,7 @@ function createInvite_(p) {
 // ------------------------------------------------------------
 // Daily check: day-of nudge, reminders, escalation
 // ------------------------------------------------------------
-function dailyCheck() { stampHeartbeat_(); runCheck_(false); cleanupUploads_(); } // used by the daily trigger
+function dailyCheck() { stampHeartbeat_(); runCheck_(false); cleanupUploads_(); try { sendRedoNotices_(); } catch (err) {} } // used by the daily trigger
 function runReminderCheckNow() {          // menu: runs even on weekends, then shows what happened
   if (!checkSender_()) return;
   const report = runCheck_(true);
@@ -1008,7 +1022,10 @@ function out_(s) { return ContentService.createTextOutput(s); }
 //   chunk    → backup path: one piece of an answer (base64 text), stored temporarily
 //   finish   → backup path: joins the pieces into "<NN Question>.<ext>" in their Drive folder
 //   photo    → one photo into their Photos folder
+//   clip     → a piece of a saved answer, so they can watch it back
 //   complete → marks VIDEO RECEIVED ✅ and links their Drive folder in the sheet
+// Once someone is Received, answers stay open for redos until the end of their Month,
+// then lock (a redo request from the menu reopens just the questions asked for).
 // ============================================================
 const DEMO_TOKEN = 'demo';
 const CHUNK_CHARS = 4 * 1024 * 1024; // must match the page; a multiple of 4 keeps base64 pieces joinable
@@ -1023,6 +1040,7 @@ function recorderApi_(body) {
       case 'finish':   return json_(apiFinish_(who, body));
       case 'direct':   return json_(apiDirect_(who, body));
       case 'saved':    return json_(apiSaved_(who, body));
+      case 'clip':     return json_(apiClip_(who, body));
       case 'photo':    return json_(apiPhoto_(who, body));
       case 'complete': return json_(apiComplete_(who, body));
       default:         return json_({ ok: false, error: 'Unknown action' });
@@ -1121,20 +1139,82 @@ function photoCount_(folder) {
 
 function apiStart_(who) {
   const folder = personFolder_(who);
-  const done = who.demo ? [] : savedSteps_(folder);
-  let received = false;
-  if (!who.demo) {
-    const r = rows_(getSheet_()).find(x => x.row === who.row);
-    received = !!(r && r.get(COL.RECEIVED));
+  const takes = who.demo ? {} : savedTakes_(folder);
+  const lock = lockState_(who, true);
+  return { ok: true, name: who.name, first: who.first, demo: !!who.demo, done: Object.keys(takes), takes: takes,
+           photos: who.demo ? 0 : photoCount_(folder), received: lock.received, locked: lock.locked,
+           lockLabel: lock.label, redo: redoList_(who), chunkChars: CHUNK_CHARS, direct: true };
+}
+
+/** Newest saved file per step: { Q03: {fileId, size, mime, name} } */
+function savedTakes_(folder) {
+  const out = {};
+  const it = folder.getFiles();
+  while (it.hasNext()) {
+    const f = it.next();
+    if (f.isTrashed()) continue;
+    const m = f.getName().match(/^([A-Za-z]?\d{1,2})\s/);
+    if (!m) continue;
+    const prev = out[m[1]];
+    const t = f.getDateCreated().getTime();
+    if (!prev || t > prev.t) out[m[1]] = { fileId: f.getId(), size: f.getSize(), mime: f.getMimeType(), name: f.getName(), t: t };
   }
-  return { ok: true, name: who.name, first: who.first, demo: !!who.demo, done: done,
-           photos: who.demo ? 0 : photoCount_(folder), received: received, chunkChars: CHUNK_CHARS, direct: true };
+  Object.keys(out).forEach(k => delete out[k].t);
+  return out;
+}
+
+/**
+ * Answers can be redone any time until they're Received and their Month is over.
+ * Lock = midnight after the last day of their Month (script time zone). Before Received: never locked.
+ */
+function lockState_(who, fresh) {
+  if (who.demo) return { received: false, locked: false, label: '' };
+  const cache = CacheService.getScriptCache();
+  const key = 'lock_' + who.token;
+  if (!fresh) { const hit = cache.get(key); if (hit) return JSON.parse(hit); }
+  const r = rows_(getSheet_()).find(x => x.row === who.row);
+  const received = !!(r && r.get(COL.RECEIVED));
+  const end = r ? lockDate_(monthLabel_(r.get(COL.MONTH)), dayOf_(r)) : null;
+  const out = {
+    received: received,
+    locked: !!(received && end && new Date() >= end),
+    label: end ? Utilities.formatDate(new Date(end.getTime() - 1000), tz_(), 'MMMM d') : '',
+  };
+  cache.put(key, JSON.stringify(out), 300);
+  return out;
+}
+
+/** The moment their Month ends: the first of the next month. The Month's year is the first one on/after the Record Date. */
+function lockDate_(month, recordDay) {
+  const i = MONTHS.map(m => m.slice(0, 3).toLowerCase()).indexOf(String(month || '').trim().slice(0, 3).toLowerCase());
+  if (i < 0) return null;
+  const base = recordDay || new Date();
+  const year = i < base.getMonth() ? base.getFullYear() + 1 : base.getFullYear();
+  return new Date(year, i + 1, 1);
+}
+
+function redoList_(who) {
+  if (who.demo) return [];
+  try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('REDO_' + who.token) || '[]'); } catch (e) { return []; }
+}
+function setRedoList_(who, list) {
+  const props = PropertiesService.getScriptProperties();
+  if (list.length) props.setProperty('REDO_' + who.token, JSON.stringify(list)); else props.deleteProperty('REDO_' + who.token);
+}
+
+/** Throws if this answer is locked (Received, Month over, and no redo requested for it). */
+function assertCanRecord_(who, stepId) {
+  const lock = lockState_(who, false);
+  if (!lock.locked) return;
+  if (stepId && redoList_(who).indexOf(stepId) !== -1) return;
+  throw new Error('Your Fishbowl answers are locked in now. Need a change? Reply to your invite email.');
 }
 
 function apiChunk_(who, b) {
   const uploadId = String(b.uploadId || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
   const index = Number(b.index), total = Number(b.total);
   if (!uploadId || !(index >= 0) || !(total > 0) || index >= total || total > 200) throw new Error('Bad chunk');
+  if (index === 0) assertCanRecord_(who, uploadId.split('-')[0]);
   const data = String(b.data || '');
   if (!data || data.length > CHUNK_CHARS + 16 || /[^A-Za-z0-9+/=]/.test(data.slice(0, 200))) throw new Error('Bad chunk data');
   const tmp = tempFolder_();
@@ -1153,6 +1233,7 @@ function apiFinish_(who, b) {
   const ext = /^(mp4|webm|mov)$/.test(b.ext) ? b.ext : 'webm';
   const mime = /^video\/(mp4|webm|quicktime)/.test(b.mime || '') ? String(b.mime).split(';')[0] : 'video/' + ext;
   if (!uploadId || !(total > 0) || !stepId) throw new Error('Bad finish');
+  assertCanRecord_(who, stepId);
 
   const tmp = tempFolder_();
   const parts = [];
@@ -1167,8 +1248,8 @@ function apiFinish_(who, b) {
   const folder = personFolder_(who);
   const file = folder.createFile(blob);
   parts.forEach(f => f.setTrashed(true));
-  trashOtherTakes_(folder, stepId, file.getId()); // a re-recorded answer replaces the earlier take
-  markProgress_(who, folder, b.totalSteps);
+  const replaced = trashOtherTakes_(folder, stepId, file.getId()); // a re-recorded answer replaces the earlier take
+  afterTake_(who, folder, stepId, title, replaced, b.totalSteps);
   return { ok: true, fileId: file.getId(), bytes: Math.floor(b64.length * 3 / 4) };
 }
 
@@ -1179,6 +1260,7 @@ function apiFinish_(who, b) {
  */
 function apiDirect_(who, b) {
   const v = takeInfo_(b);
+  assertCanRecord_(who, v.stepId);
   const size = Number(b.size);
   if (!(size > 0) || size > 1024 * 1024 * 1024) throw new Error('Bad size');
   const origin = /^https?:\/\/[A-Za-z0-9.-]+(:\d+)?$/.test(b.origin || '') ? b.origin
@@ -1220,8 +1302,8 @@ function apiSaved_(who, b) {
   const ps = file.getParents();
   while (ps.hasNext()) { if (ps.next().getId() === folder.getId()) inFolder = true; }
   if (!inFolder || file.getName().indexOf(v.stepId + ' ') !== 0) throw new Error('Upload not found');
-  trashOtherTakes_(folder, v.stepId, fileId);
-  markProgress_(who, folder, b.totalSteps);
+  const replaced = trashOtherTakes_(folder, v.stepId, fileId);
+  afterTake_(who, folder, v.stepId, v.title, replaced, b.totalSteps);
   return { ok: true, fileId: fileId, bytes: file.getSize() };
 }
 
@@ -1235,13 +1317,85 @@ function takeInfo_(b) {
   return { stepId: stepId, title: title, ext: ext, mime: mime, name: stepId + ' ' + title + '.' + ext };
 }
 
+/** Moves older takes of this step to Drive's trash (kept 30 days). Returns how many. */
 function trashOtherTakes_(folder, stepId, keepId) {
+  let n = 0;
   const it = folder.getFiles();
   while (it.hasNext()) {
     const f = it.next();
-    if (!f.isTrashed() && f.getId() !== keepId && f.getName().indexOf(stepId + ' ') === 0) f.setTrashed(true);
+    if (!f.isTrashed() && f.getId() !== keepId && f.getName().indexOf(stepId + ' ') === 0) { f.setTrashed(true); n++; }
   }
+  return n;
 }
+
+/**
+ * After an answer saves: progress while recording; once Received, a re-record clears any redo
+ * request for it, leaves a note on their row, and queues an email to the Fishbowl inbox.
+ */
+function afterTake_(who, folder, stepId, title, replaced, totalSteps) {
+  if (who.demo) return;
+  const lock = lockState_(who, true);
+  if (!lock.received) { markProgress_(who, folder, totalSteps); return; }
+  if (!replaced && redoList_(who).indexOf(stepId) === -1) return; // first time this answer was saved
+  const left = redoList_(who).filter(x => x !== stepId);
+  setRedoList_(who, left);
+  const label = stepId + ' ' + title;
+  withSheetLock_(sh => {
+    const r = rows_(sh).find(x => x.row === who.row);
+    if (!r) return;
+    const st = String(r.get(COL.STATUS) || '');
+    if (st.indexOf('Redo requested') === 0) r.set(COL.STATUS, left.length ? 'Redo requested: ' + left.join(', ') : STATUS.RECEIVED);
+    const cell = sh.getRange(r.row, headerMap_(sh)[norm_(COL.STATUS)] + 1);
+    const stamp = Utilities.formatDate(new Date(), tz_(), 'M/d');
+    cell.setNote(((cell.getNote() || '') + '\n' + stamp + ': re-recorded ' + label).trim());
+  });
+  const props = PropertiesService.getScriptProperties();
+  const key = 'REDONE_' + who.token;
+  let q = {};
+  try { q = JSON.parse(props.getProperty(key) || '{}'); } catch (e) {}
+  q.name = who.name; q.first = q.first || Date.now(); q.steps = (q.steps || []).filter(x => x !== label).concat([label]);
+  props.setProperty(key, JSON.stringify(q));
+}
+
+/** Emails the Fishbowl inbox about re-recorded answers (on "I'm done", or from the daily check). */
+function sendRedoNotices_(onlyToken) {
+  const props = PropertiesService.getScriptProperties();
+  const all = props.getProperties();
+  Object.keys(all).filter(k => k.indexOf('REDONE_') === 0 && (!onlyToken || k === 'REDONE_' + onlyToken)).forEach(k => {
+    let q; try { q = JSON.parse(all[k]); } catch (e) { props.deleteProperty(k); return; }
+    if (!q.steps || !q.steps.length) { props.deleteProperty(k); return; }
+    try {
+      MailApp.sendEmail({ to: adminEmail_(), name: CONFIG.SENDER_NAME,
+        subject: '🐟 ' + q.name + ' re-recorded ' + q.steps.length + ' answer' + (q.steps.length > 1 ? 's' : ''),
+        htmlBody: '<p><b>' + esc_(q.name) + '</b> re-recorded:</p><ul>' + q.steps.map(x => '<li>' + esc_(x) + '</li>').join('') +
+          '</ul><p>If their video is already cut, swap in the new clip' + (q.steps.length > 1 ? 's' : '') + ' (the old takes are in Drive\'s trash for 30 days).</p><p>' + sheetLink_() + '</p>' });
+      props.deleteProperty(k);
+    } catch (err) { /* try again next time */ }
+  });
+}
+
+/** Watch-back: returns one piece (base64) of a saved answer. */
+function apiClip_(who, b) {
+  const stepId = String(b.stepId || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 4);
+  const offset = Math.max(0, Math.floor(Number(b.offset) || 0));
+  const takes = savedTakes_(personFolder_(who));
+  const t = takes[stepId];
+  if (!t) throw new Error('That answer isn\'t saved yet.');
+  const end = Math.min(t.size, offset + CLIP_BYTES) - 1;
+  let bytes;
+  try {
+    const res = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + t.fileId + '?alt=media', {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken(), Range: 'bytes=' + offset + '-' + end },
+      muteHttpExceptions: true });
+    if (res.getResponseCode() !== 206 && res.getResponseCode() !== 200) throw new Error('range ' + res.getResponseCode());
+    bytes = res.getContent();
+    if (res.getResponseCode() === 200) bytes = bytes.slice(offset, end + 1);
+  } catch (err) {
+    bytes = DriveApp.getFileById(t.fileId).getBlob().getBytes().slice(offset, end + 1);
+  }
+  return { ok: true, data: Utilities.base64Encode(bytes), offset: offset, size: t.size, mime: t.mime, done: end + 1 >= t.size };
+}
+const CLIP_BYTES = 3 * 1024 * 1024;
 
 /** Status → "Recording n/16" and links their folder (real tributes only). */
 function markProgress_(who, folder, totalSteps) {
@@ -1258,6 +1412,7 @@ function markProgress_(who, folder, totalSteps) {
 }
 
 function apiPhoto_(who, b) {
+  assertCanRecord_(who, '');
   const data = String(b.data || '');
   if (!data || data.length > 12 * 1024 * 1024) throw new Error('Photo too large');
   const mime = /^image\/(jpeg|png|webp|heic|heif)$/.test(b.mime || '') ? b.mime : 'image/jpeg';
@@ -1283,6 +1438,8 @@ function apiComplete_(who, b) {
       r.set(COL.STATUS, STATUS.RECEIVED);
     }
   });
+  CacheService.getScriptCache().remove('lock_' + who.token);
+  sendRedoNotices_(who.token);
   return { ok: true, saved: done.length };
 }
 
@@ -1303,6 +1460,89 @@ function cleanupUploads_() {
     const it = tempFolder_().getFiles();
     while (it.hasNext()) { const f = it.next(); if (f.getDateCreated().getTime() < cutoff) f.setTrashed(true); }
   } catch (err) { /* never block reminders */ }
+}
+
+// ------------------------------------------------------------
+// Request a redo: asks one tribute to re-record specific answers (works even after their answers lock)
+// ------------------------------------------------------------
+function showRequestRedo() {
+  if (!checkSender_()) return;
+  const ui = SpreadsheetApp.getUi();
+  const rows = selectedRows_();
+  if (rows.length !== 1) { ui.alert('Click one tribute\'s row first.'); return; }
+  const r = rows[0];
+  if (!r.get(COL.SENT)) { ui.alert(r.get(COL.NAME) + ' hasn\'t been invited yet, so there\'s nothing to redo.'); return; }
+  const p = personFromRow_(r);
+  const steps = questionList_();
+  const takes = savedTakes_(personFolder_({ token: p.token, name: p.name, month: p.month }));
+  const pending = redoList_({ token: p.token });
+  const items = steps.map(st => `<label class="q"><input type="checkbox" value="${esc_(st.id)}"${pending.indexOf(st.id) !== -1 ? ' checked' : ''}>
+      <b>${esc_(st.id)}</b> ${esc_(st.file || st.text)}${takes[st.id] ? '' : ' <span class="none">(not recorded)</span>'}</label>`).join('');
+  const html = `<!doctype html><html><head><base target="_top"><style>
+    body{font-family:Roboto,Arial,sans-serif;margin:0;padding:16px 20px;color:${THEME.NAVY};font-size:14px}
+    p{margin:0 0 10px;color:#5b6b75;font-size:13px}.list{max-height:260px;overflow:auto;border:1px solid #d5ecef;border-radius:8px;padding:6px 10px}
+    .q{display:flex;gap:8px;align-items:center;padding:5px 0}.q b{min-width:28px}.none{color:#8a97a0}
+    textarea{width:100%;box-sizing:border-box;margin-top:10px;border:1px solid #c9dfe3;border-radius:8px;padding:8px;font:inherit;min-height:60px}
+    .btns{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+    button{border:0;border-radius:20px;padding:9px 16px;font-size:14px;font-weight:700;cursor:pointer}
+    .go{background:${THEME.TEAL};color:#fff}.go:disabled{opacity:.6}.cancel{background:#eef5f6;color:${THEME.NAVY}}#msg{color:#b3261e;font-size:13px;margin-top:8px}
+  </style></head><body>
+    <p>Pick the answers ${esc_(p.first)} should re-record. They get an email with their link, and only these answers reopen if theirs are locked.</p>
+    <div class="list">${items}</div>
+    <textarea id="note" placeholder="Optional note to them, e.g. &quot;The end got cut off. Could you say it once more?&quot;"></textarea>
+    <div id="msg"></div>
+    <div class="btns"><button class="cancel" onclick="google.script.host.close()">Cancel</button><button class="go" id="go" onclick="send()">Send request</button></div>
+    <script>
+      function send(){
+        const ids=[...document.querySelectorAll('input[type=checkbox]:checked')].map(x=>x.value);
+        const msg=document.getElementById('msg'),go=document.getElementById('go');
+        if(!ids.length){msg.textContent='Tick at least one answer.';return}
+        go.disabled=true;msg.textContent='';
+        google.script.run.withSuccessHandler(function(res){if(res.ok)google.script.host.close();else{go.disabled=false;msg.textContent=res.message}})
+          .withFailureHandler(function(e){go.disabled=false;msg.textContent=e.message}).requestRedo(${r.row}, ids, document.getElementById('note').value);
+      }
+    </script></body></html>`;
+  ui.showModalDialog(HtmlService.createHtmlOutput(html).setWidth(460).setHeight(500), '🔁 Request a redo: ' + p.name);
+}
+
+/** Called by the dialog. Reopens those answers, updates the row, and emails the tribute. */
+function requestRedo(row, ids, note) {
+  checkSender_(true);
+  const steps = questionList_();
+  const pick = steps.filter(st => ids.indexOf(st.id) !== -1);
+  if (!pick.length) return { ok: false, message: 'Tick at least one answer.' };
+  const sh = getSheet_();
+  const r = rows_(sh).find(x => x.row === Number(row));
+  if (!r) return { ok: false, message: 'That row moved. Close this and try again.' };
+  const p = personFromRow_(r);
+  const who = { token: p.token };
+  const list = redoList_(who).concat(pick.map(st => st.id)).filter((x, i, a) => a.indexOf(x) === i);
+  setRedoList_(who, list);
+  r.set(COL.STATUS, 'Redo requested: ' + list.join(', '));
+  CacheService.getScriptCache().remove('lock_' + p.token);
+  const link = personalLink_(p);
+  const items = pick.map(st => '<li><b>' + esc_(st.text || st.file) + '</b></li>').join('');
+  MailApp.sendEmail({ to: p.email, name: CONFIG.SENDER_NAME, replyTo: adminEmail_(),
+    subject: '🐟 Quick Fishbowl redo',
+    htmlBody: '<p>Hi ' + esc_(p.first) + ',</p><p>Could you re-record ' + (pick.length > 1 ? 'these answers' : 'this answer') +
+      ' for your Fishbowl? It only takes a minute.</p><ul>' + items + '</ul>' +
+      (String(note || '').trim() ? '<p>' + esc_(String(note).trim()) + '</p>' : '') +
+      '<p><a href="' + link + '" style="background:#14a3a8;color:#fff;padding:12px 22px;border-radius:24px;text-decoration:none;font-weight:bold;display:inline-block">▶ Open my Fishbowl</a></p>' +
+      '<p style="color:#555;font-size:13px">Your link opens right to ' + (pick.length > 1 ? 'them' : 'it') + '. Everything else you recorded stays as is.</p>' });
+  toast_('Redo request sent to ' + p.name + '.');
+  return { ok: true };
+}
+
+/** The question list, read from the recorder page so names always match. */
+function questionList_() {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get('questions');
+  if (hit) return JSON.parse(hit);
+  const url = String(CONFIG.RECORDER_URL).replace(/[?#].*$/, '').replace(/\/?$/, '/') + 'config/questions.json';
+  const steps = JSON.parse(UrlFetchApp.fetch(url, { muteHttpExceptions: false }).getContentText()).steps
+    .map(st => ({ id: st.id, file: st.file, text: st.text }));
+  cache.put('questions', JSON.stringify(steps), 3600);
+  return steps;
 }
 
 /** Menu: shows (and lets you copy) the selected row's personal recording link. */

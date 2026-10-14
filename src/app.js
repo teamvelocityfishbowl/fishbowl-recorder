@@ -23,6 +23,10 @@
     queue: [], uploading: false, uploadErr: '', savedCount: 0, waiters: [], pct: -1,
     direct: null, // null = not tried yet, true = straight-to-Drive works here, false = use pieces
     photos: [], audioCtx: null, meterRaf: 0, screen: 'loading',
+    local: {},          // stepId → object URL of a take recorded in this visit (for watch-back)
+    redo: new Set(),    // answers the Fishbowl team asked them to redo
+    returnTo: null,     // 'list' when a question was opened from the All questions screen
+    finished: false,    // true once they've reached the end (or were already Received)
   };
 
   // ---------------------------------------------------------------- art
@@ -73,14 +77,17 @@
     app.innerHTML = `<section class="screen screen-${name}" data-screen="${name}">${html}</section>`;
     window.scrollTo(0, 0);
     updateRotate();
+    setAllBtn(['question', 'photos'].includes(name));
     return app.firstElementChild;
   }
+
+  function setAllBtn(on) { const b = $('#allBtn'); if (b) b.hidden = !on; }
 
   function updateProgress() {
     const total = S.steps.length || 16;
     const n = S.done.size;
     const p = $('#progress');
-    p.hidden = !['question', 'photos', 'done'].includes(S.screen);
+    p.hidden = !['question', 'photos', 'done', 'list'].includes(S.screen);
     $('#progressLabel').textContent = S.screen === 'question' ? `${Math.min(S.idx + 1, total)} of ${total}` : `${n} of ${total} saved`;
     $('#progressBowl').style.backgroundImage = svgUrl(bowlSvg(0.08 + 0.86 * (n / total), '', { still: true }));
   }
@@ -102,7 +109,7 @@
 
   async function previewApi(action, data) {
     await sleep(action === 'chunk' ? 250 : 350);
-    if (action === 'start') return { ok: true, name: 'Preview Tribute', first: 'there', demo: true, done: [], photos: 0, received: false };
+    if (action === 'start') return { ok: true, name: 'Preview Tribute', first: 'there', demo: true, done: [], takes: {}, redo: [], photos: 0, received: false, locked: false };
     if (action === 'finish') return { ok: true, bytes: 0 };
     if (action === 'direct') return { ok: false, error: 'Preview mode' };
     return { ok: true };
@@ -323,7 +330,13 @@
     $('#go', el).addEventListener('click', cameraCheck);
   }
 
-  async function cameraCheck() {
+  /** Runs fn once the camera is on (shows the camera check first if it isn't). */
+  function withCamera(fn) {
+    if (S.stream && S.stream.active) return fn();
+    cameraCheck(fn);
+  }
+
+  async function cameraCheck(after) {
     const el = show('check', `<div class="check">
       <div class="camera"><video id="live" autoplay muted playsinline></video>
         <div class="cam-note" id="camNote">Asking for your camera and microphone…</div></div>
@@ -347,7 +360,7 @@
     startMeter($('#meter', el));
     const btn = $('#ready', el);
     btn.disabled = false;
-    btn.addEventListener('click', () => { stopMeter(); nextQuestion(); });
+    btn.addEventListener('click', () => { stopMeter(); (typeof after === 'function' ? after : nextQuestion)(); });
   }
 
   function cameraError(err) {
@@ -452,6 +465,7 @@
   }
 
   function countIn(step, el) {
+    setAllBtn(false);
     const cam = $('#cam', el);
     $('#controls', el).innerHTML = `<button class="btn btn-ghost" disabled>Get ready…</button>`;
     const box = document.createElement('div');
@@ -526,11 +540,25 @@
 
   function useTake(step) {
     enqueue({ step, blob: S.blob, mime: S.mime, ext: S.ext });
+    if (S.local[step.id]) URL.revokeObjectURL(S.local[step.id]);
+    S.local[step.id] = URL.createObjectURL(S.blob);
     S.done.add(step.id);
+    S.redo.delete(step.id);
     S.blob = null;
+    if (S.returnTo) { S.returnTo = null; return burstThen(() => allQuestions()); }
     S.idx++;
     burstThen(nextQuestion);
   }
+
+  /** Opens one question from the All questions screen; "Use this take" comes back to the list. */
+  function openStep(step) {
+    S.idx = S.steps.indexOf(step);
+    S.returnTo = 'list';
+    withCamera(() => question(step, 'ready'));
+  }
+
+  const canRecord = (step) => !S.who.locked || S.redo.has(step.id);
+  const allDone = () => S.steps.every((st) => S.done.has(st.id));
 
   function burstThen(fn) {
     const card = $('.card');
@@ -624,18 +652,125 @@
   }
 
   function doneScreen(already) {
-    S.screen = 'done';
-    show('done', `<div class="center done stagger">
-      <div class="burst"><div class="hero-bowl" style="width:100%">${bowlSvg(0.95, '🐟')}</div></div>
-      <p class="eyebrow">${already ? 'Already in the bowl' : 'All done'}</p>
-      <h1>That's a wrap, ${esc(S.who.first || 'friend')}!</h1>
-      <p class="lede">${already
-        ? 'Your Fishbowl answers are already saved. Thanks again! If you need to change something, reply to your invite email.'
-        : PREVIEW ? '⚠️ Preview mode: this run was NOT saved anywhere. Connect the backend in src/config.js to save recordings.'
-        : 'Your answers are saved and on their way to the Fishbowl team. Thanks for jumping in. Your coworkers are going to love it.'}</p>
-      <p class="small">You can close this tab.</p></div>`);
-    S.done = new Set(S.steps.map((s) => s.id));
+    S.finished = true;
+    S.already = !!already;
+    allQuestions();
+  }
+
+  // ---------------------------------------------------------------- All questions
+  const SECTIONS = [['intro', 'Intro'], ['splash', 'Splash Round'], ['deep', 'Questions']];
+
+  function allQuestions() {
+    const fin = S.finished, locked = S.who.locked, label = S.who.lockLabel;
+    const until = label ? `until ${esc(label)}` : 'until the end of your Fishbowl month';
+    let eyebrow, title, lede;
+    if (!fin) {
+      eyebrow = 'All questions'; title = 'Jump to any question';
+      lede = 'Tap one to record it, or redo one you already saved. Saved answers can be watched back.';
+    } else if (locked) {
+      eyebrow = 'Locked in'; title = 'Your Fishbowl is locked in';
+      lede = `Answers closed on ${esc(label)}, so you can watch them but not change them. Need a change? Reply to your invite email.`;
+    } else if (S.already) {
+      eyebrow = 'Already in the bowl'; title = `Welcome back, ${esc(S.who.first || 'friend')}!`;
+      lede = `Your Fishbowl is saved. You can watch or redo any answer ${until}.`;
+    } else {
+      eyebrow = 'All done'; title = `That's a wrap, ${esc(S.who.first || 'friend')}!`;
+      lede = PREVIEW ? '⚠️ Preview mode: this run was NOT saved anywhere. Connect the backend in src/config.js to save recordings.'
+        : `Your answers are saved and on their way to the Fishbowl team. Want to change one? Watch or redo any answer ${until}.`;
+    }
+    const redoNote = S.redo.size
+      ? `<div class="notice ask">The Fishbowl team asked you to redo ${S.redo.size > 1 ? `${S.redo.size} answers` : 'one answer'}. Tap <b>Redo</b> next to ${S.redo.size > 1 ? 'each one' : 'it'} below. Everything else stays as is.</div>` : '';
+    const row = (st) => {
+      const saved = S.done.has(st.id), ask = S.redo.has(st.id);
+      const n = S.steps.filter((x) => x.section === st.section).indexOf(st) + 1;
+      const tag = st.section === 'intro' ? 'Intro' : st.section === 'splash' ? `S${n}` : `Q${n}`;
+      const rec = canRecord(st) ? `<button class="btn btn-small ${ask ? 'btn-primary' : 'btn-ghost'}" data-rec="${st.id}">${saved ? 'Redo' : 'Record'}</button>` : '';
+      return `<div class="ov-row${saved ? ' saved' : ''}${ask ? ' ask' : ''}">
+        <span class="ov-tag">${tag}</span>
+        <span class="ov-text">${esc(st.text)}</span>
+        <span class="ov-state">${ask ? 'Redo requested' : saved ? '✓ Saved' : 'Not recorded'}</span>
+        <span class="ov-actions">${saved ? `<button class="btn btn-small btn-ghost" data-watch="${st.id}">▶ Watch</button>` : ''}${rec}</span>
+      </div>`;
+    };
+    const groups = SECTIONS.map(([sec, name]) => {
+      const list = S.steps.filter((st) => st.section === sec);
+      return list.length ? `<h3 class="ov-group">${name}</h3>${list.map(row).join('')}` : '';
+    }).join('');
+    const photoRow = fin && !locked ? `<h3 class="ov-group">Photos</h3><div class="ov-row"><span class="ov-tag">📸</span>
+      <span class="ov-text">Add a few more photos</span><span class="ov-state"></span>
+      <span class="ov-actions"><button class="btn btn-small btn-ghost" id="morePhotos">Add photos</button></span></div>` : '';
+    const primary = !fin
+      ? (allDone() ? `<button class="btn btn-primary" id="next">Continue to photos ${ARROW}</button>` : `<button class="btn btn-primary" id="next">Keep going ${ARROW}</button>`)
+      : (locked && !S.redo.size ? '' : `<button class="btn btn-primary" id="allSet">I'm all set</button>`);
+    const el = show('list', `<div class="overview stagger">
+      <div class="ov-head ${fin ? 'center done' : ''}">
+        ${fin ? `<div class="burst small-burst"><div class="hero-bowl" style="width:100%">${bowlSvg(0.95, '🐟')}</div></div>` : ''}
+        <p class="eyebrow">${eyebrow}</p>
+        <h1>${title}</h1>
+        <p class="lede">${lede}</p>
+      </div>
+      ${redoNote}
+      <div class="ov-list">${groups}${photoRow}</div>
+      <div class="ov-foot">${primary}<span class="small" id="footNote">${fin ? 'You can close this tab when the Saving… pill says saved.' : ''}</span></div>
+    </div>`);
     updateProgress();
+    el.querySelectorAll('[data-rec]').forEach((b) => b.addEventListener('click', () => openStep(S.steps.find((st) => st.id === b.dataset.rec))));
+    el.querySelectorAll('[data-watch]').forEach((b) => b.addEventListener('click', () => watch(S.steps.find((st) => st.id === b.dataset.watch))));
+    const next = $('#next', el);
+    if (next) next.addEventListener('click', () => (allDone() ? photos() : withCamera(() => { S.idx = 0; nextQuestion(); })));
+    const more = $('#morePhotos', el);
+    if (more) more.addEventListener('click', photos);
+    const set = $('#allSet', el);
+    if (set) set.addEventListener('click', async () => {
+      set.disabled = true; set.textContent = 'Saving…';
+      await idle();
+      try { await withRetry(() => api('complete', {}), 4); } catch (e) {}
+      stopCamera();
+      set.textContent = '✓ All saved';
+      $('#footNote', el).textContent = 'Thanks! You can close this tab.';
+    });
+  }
+
+  // ---------------------------------------------------------------- watch back
+  async function watch(step) {
+    const box = document.createElement('div');
+    box.className = 'player';
+    box.innerHTML = `<div class="player-card"><div class="player-head"><span>${esc(step.text)}</span>
+      <button class="link-btn" id="closePlayer">Close</button></div>
+      <div class="player-body"><div class="spinner"></div><p class="small" id="loadPct">Loading your answer…</p></div></div>`;
+    document.body.appendChild(box);
+    const close = () => { box.remove(); };
+    box.querySelector('#closePlayer').addEventListener('click', close);
+    box.addEventListener('click', (e) => { if (e.target === box) close(); });
+    try {
+      const url = S.local[step.id] || (S.local[step.id] = await fetchClip(step, (pct) => {
+        const t = box.querySelector('#loadPct'); if (t) t.textContent = `Loading your answer… ${pct}%`;
+      }));
+      if (!box.isConnected) return;
+      const body = box.querySelector('.player-body');
+      body.innerHTML = '<video controls playsinline autoplay></video>';
+      body.querySelector('video').src = url;
+    } catch (err) {
+      const t = box.querySelector('#loadPct');
+      if (t) t.textContent = "Couldn't load that answer. Check your connection and try again.";
+    }
+  }
+
+  async function fetchClip(step, onPct) {
+    const parts = [];
+    let offset = 0, size = 1, mime = 'video/mp4';
+    for (;;) {
+      const r = await withRetry(() => api('clip', { stepId: step.id, offset }), 3);
+      const bin = atob(r.data || '');
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      parts.push(bytes);
+      size = r.size || 1; mime = r.mime || mime;
+      offset += bytes.length;
+      onPct(Math.min(100, Math.round((offset / size) * 100)));
+      if (r.done || !bytes.length) break;
+    }
+    return URL.createObjectURL(new Blob(parts, { type: mime }));
   }
 
   // ---------------------------------------------------------------- keyboard
@@ -666,9 +801,17 @@
       return errorScreen("We couldn't open your Fishbowl", esc(err.message || 'Check your connection and reload the page.'));
     }
     (S.who.done || []).forEach((id) => S.done.add(id));
+    (S.who.redo || []).forEach((id) => S.redo.add(id));
     if (S.who.received) return doneScreen(true);
     welcome();
   }
+
+  $('#allBtn').addEventListener('click', () => {
+    if (S.rec && S.rec.state === 'recording') return;
+    clearTimers();
+    S.returnTo = null;
+    allQuestions();
+  });
 
   // exposed for automated tests only
   window.__fishbowl = { S, api, CHUNK };
