@@ -77,7 +77,7 @@
     app.innerHTML = `<section class="screen screen-${name}" data-screen="${name}">${html}</section>`;
     window.scrollTo(0, 0);
     updateRotate();
-    setAllBtn(['question', 'photos'].includes(name));
+    setAllBtn(['question', 'photos', 'splashintro'].includes(name));
     return app.firstElementChild;
   }
 
@@ -399,10 +399,15 @@
   }
   function stopMeter() { cancelAnimationFrame(S.meterRaf); }
 
+  /** Next unanswered question after the current one, wrapping back to any that were skipped. Photos once all are done. */
   function nextQuestion() {
-    while (S.idx < S.steps.length && S.done.has(S.steps[S.idx].id)) S.idx++;
-    if (S.idx >= S.steps.length) return photos();
-    question(S.steps[S.idx], 'ready');
+    const n = S.steps.length;
+    for (let k = 0; k < n; k++) {
+      const i = (Math.max(0, S.idx) + k) % n;
+      if (!S.done.has(S.steps[i].id)) { S.idx = i; return question(S.steps[i], 'ready'); }
+    }
+    S.idx = n;
+    photos();
   }
 
   /** "Dogs or cats?" → ["Dogs", "Cats"] (for the one-word example). */
