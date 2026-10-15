@@ -405,6 +405,30 @@
     question(S.steps[S.idx], 'ready');
   }
 
+  /** "Dogs or cats?" → ["Dogs", "Cats"] (for the one-word example). */
+  function choices(text) {
+    const m = String(text).replace(/\?$/, '').split(/\s+or\s+/i);
+    return m.length === 2 ? m.map((x) => x.trim().replace(/^./, (c) => c.toUpperCase())) : null;
+  }
+
+  /** Once per visit, right before the first Splash Round question: the one-word rule, loud and clear. */
+  function splashIntro(step) {
+    S.splashBriefed = true;
+    const n = S.steps.filter((x) => x.section === 'splash').length;
+    const el = show('splashintro', `<div class="center splash-intro stagger">
+      <p class="eyebrow">Next up</p>
+      <h1 class="splash-big">💦 Splash Round</h1>
+      <p class="lede">${n} quick this-or-that questions. Answer each with <b>ONE&nbsp;WORD</b>. That's it.</p>
+      <div class="splash-examples">
+        <div class="ex good"><span class="ex-mark">✓</span><span class="ex-label">Perfect</span><span class="ex-say">"Dogs."</span></div>
+        <div class="ex bad"><span class="ex-mark">✕</span><span class="ex-label">Too much</span><span class="ex-say">"Ooh, well, I grew up with dogs, so…"</span></div>
+      </div>
+      <p class="small">You only get ${step.seconds} seconds, and the recording stops on its own.</p>
+      <button class="btn btn-primary" id="gotIt">Got it: one word ${ARROW}</button>
+    </div>`);
+    $('#gotIt', el).addEventListener('click', () => question(step, 'ready'));
+  }
+
   function sectionMeta(step) {
     const same = S.steps.filter((s) => s.section === step.section);
     const n = same.indexOf(step) + 1;
@@ -415,10 +439,12 @@
 
   function question(step, state) {
     const splash = step.section === 'splash';
+    if (splash && state === 'ready' && !S.splashBriefed) return splashIntro(step);
+    const pair = splash ? choices(step.text) : null;
     const limit = step.seconds;
     const hint = state === 'review'
       ? 'Happy with it? Use this take, or record it again.'
-      : splash ? `One word only. You've got ${limit} seconds!` : `Short and sweet: up to ${limit} seconds, after a 3-2-1 countdown.`;
+      : splash ? (pair ? `Just say "${pair[0]}" or "${pair[1]}". Nothing else!` : `One word only. You've got ${limit} seconds!`) : `Short and sweet: up to ${limit} seconds, after a 3-2-1 countdown.`;
     const el = show('question', `<div class="stage">
       <div class="camera" id="cam">
         <video id="live" autoplay muted playsinline></video>
@@ -427,6 +453,7 @@
           <circle class="bar" id="ring" cx="38" cy="38" r="33" fill="none" stroke-width="7" stroke-linecap="round" stroke-dasharray="207.3" stroke-dashoffset="0"/></svg>
           <span id="secs">${limit}</span></div>
         <div class="cam-badge" id="badge" hidden><span class="live"></span>REC</div>
+        ${splash ? '<div class="one-word" aria-hidden="true">ONE WORD</div>' : ''}
         ${step.section === 'intro' && state === 'ready' ? '<div class="cam-note">Tip: look at your camera lens, not the screen</div>' : ''}
       </div>
       <div class="card ${splash ? 'splash' : ''}">
@@ -435,7 +462,7 @@
           <div class="q-bowl">${splash ? bowlSvg(0.6, '?', { stroke: '#082642', water: '#ffffff' }) : bowlSvg(0.55, '?')}</div>
           <div class="q-meta">${esc(sectionMeta(step))}</div>
         </div>
-        ${splash ? '<span class="splash-tag">ONE WORD!</span>' : ''}
+        ${splash ? '<span class="splash-tag">☝️ ONE WORD ONLY</span>' : ''}
         <div class="q-text">${esc(step.text)}</div>
         <p class="q-hint">${esc(hint)}</p>
         <div class="controls" id="controls"></div>
