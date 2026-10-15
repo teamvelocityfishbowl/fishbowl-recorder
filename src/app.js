@@ -577,10 +577,13 @@
     burstThen(nextQuestion);
   }
 
-  /** Opens one question from the All questions screen; "Use this take" comes back to the list. */
+  /**
+   * Opens one question from the All questions screen. Redoing a saved answer (or anything after
+   * they've finished) comes back to the list; recording a new one carries on to the next question.
+   */
   function openStep(step) {
     S.idx = S.steps.indexOf(step);
-    S.returnTo = 'list';
+    S.returnTo = (S.finished || S.done.has(step.id)) ? 'list' : null;
     withCamera(() => question(step, 'ready'));
   }
 
