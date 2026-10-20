@@ -1136,11 +1136,49 @@ function savedSteps_(folder) {
 }
 
 function photoCount_(folder) {
+  let n = 0;
   const it = folder.getFoldersByName('Photos');
-  if (!it.hasNext()) return 0;
-  let n = 0; const files = it.next().getFiles();
-  while (files.hasNext()) { if (!files.next().isTrashed()) n++; }
+  while (it.hasNext()) { const files = it.next().getFiles(); while (files.hasNext()) { if (!files.next().isTrashed()) n++; } }
   return n;
+}
+
+/**
+ * Their one Photos folder. Several photos upload at once, so finding/creating it happens under a
+ * lock (otherwise each upload could make its own "Photos"). Any duplicates from before are merged in.
+ */
+function photosFolder_(person) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const key = 'PHOTOS_' + person.getId();
+    let main = null;
+    const id = props.getProperty(key);
+    if (id) { try { main = DriveApp.getFolderById(id); if (main.isTrashed()) main = null; } catch (err) { main = null; } }
+    const extras = [];
+    const it = person.getFoldersByName('Photos');
+    while (it.hasNext()) { const f = it.next(); if (f.isTrashed()) continue; if (!main) main = f; else if (f.getId() !== main.getId()) extras.push(f); }
+    if (!main) main = person.createFolder('Photos');
+    props.setProperty(key, main.getId());
+    extras.forEach(x => mergeFolderInto_(x, main));
+    return main;
+  } finally { lock.releaseLock(); }
+}
+
+/** Moves every file from a duplicate folder into the main one, then trashes the empty duplicate. */
+function mergeFolderInto_(from, to) {
+  const taken = {};
+  const have = to.getFiles(); while (have.hasNext()) { const f = have.next(); if (!f.isTrashed()) taken[f.getName()] = true; }
+  const files = from.getFiles();
+  while (files.hasNext()) {
+    const f = files.next();
+    if (f.isTrashed()) continue;
+    let name = f.getName();
+    if (taken[name]) { const dot = name.lastIndexOf('.'); name = (dot > 0 ? name.slice(0, dot) : name) + ' (2)' + (dot > 0 ? name.slice(dot) : ''); f.setName(name); }
+    taken[name] = true;
+    f.moveTo(to);
+  }
+  from.setTrashed(true);
 }
 
 function apiStart_(who) {
@@ -1442,13 +1480,19 @@ function apiPhoto_(who, b) {
   const data = String(b.data || '');
   if (!data || data.length > 12 * 1024 * 1024) throw new Error('Photo too large');
   const mime = /^image\/(jpeg|png|webp|heic|heif)$/.test(b.mime || '') ? b.mime : 'image/jpeg';
-  const photos = childFolder_(personFolder_(who), 'Photos');
-  let n = 0; const it = photos.getFiles(); while (it.hasNext()) { if (!it.next().isTrashed()) n++; }
-  if (n >= 12) throw new Error('That\'s plenty of photos, thanks!');
+  const photos = photosFolder_(personFolder_(who));
   const base = safeName_(String(b.name || 'photo').replace(/\.[^.]+$/, '')).slice(0, 40);
   const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
-  const file = photos.createFile(Utilities.newBlob(Utilities.base64Decode(data), mime, ('0' + (n + 1)).slice(-2) + ' ' + base + '.' + ext));
-  return { ok: true, fileId: file.getId(), count: n + 1 };
+  const bytes = Utilities.base64Decode(data);
+  // Numbering + saving under the lock too, so two photos never both become "01"
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    let n = 0; const it = photos.getFiles(); while (it.hasNext()) { if (!it.next().isTrashed()) n++; }
+    if (n >= 12) throw new Error('That\'s plenty of photos, thanks!');
+    const file = photos.createFile(Utilities.newBlob(bytes, mime, ('0' + (n + 1)).slice(-2) + ' ' + base + '.' + ext));
+    return { ok: true, fileId: file.getId(), count: n + 1 };
+  } finally { lock.releaseLock(); }
 }
 
 function apiComplete_(who, b) {

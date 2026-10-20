@@ -749,6 +749,7 @@
     const input = $('#file', el);
     const drop = $('#drop', el);
     const thumbs = $('#thumbs', el);
+    let photoChain = Promise.resolve();
     const add = (files) => {
       [...files].filter((f) => /^image\//.test(f.type) || /\.(heic|heif)$/i.test(f.name)).forEach((file) => {
         if (S.photos.length >= max) return;
@@ -759,7 +760,9 @@
         div.innerHTML = `<img alt="" src="${item.url}"><span class="state">…</span>`;
         thumbs.appendChild(div);
         item.el = div;
-        item.promise = uploadPhoto(item).then(
+        // One photo at a time, in the order they were picked (parallel uploads raced each other)
+        photoChain = photoChain.catch(() => {}).then(() => uploadPhoto(item));
+        item.promise = photoChain.then(
           () => { item.state = 'ok'; div.querySelector('.state').textContent = '✓'; },
           () => { item.state = 'err'; div.querySelector('.state').textContent = '!'; div.title = 'This photo didn\'t upload'; });
       });
@@ -970,6 +973,6 @@
   });
 
   // exposed for automated tests only
-  window.__fishbowl = { S, api, CHUNK };
+  window.__fishbowl = { S, api, CHUNK, photos };
   boot();
 })();
