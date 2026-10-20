@@ -73,6 +73,8 @@
 
   function show(name, html) {
     clearTimers();
+    // Leaving a question mid-recording (or mid-countdown): drop that take
+    if (S.rec && S.rec.state !== 'inactive' && name !== 'question') { S.rec.onstop = null; try { S.rec.stop(); } catch (e) {} keepAwake(false); }
     S.screen = name;
     app.innerHTML = `<section class="screen screen-${name}" data-screen="${name}">${html}</section>`;
     window.scrollTo(0, 0);
@@ -112,6 +114,7 @@
     if (action === 'start') return { ok: true, name: 'Preview Tribute', first: 'there', demo: true, done: [], takes: {}, redo: [], photos: 0, received: false, locked: false };
     if (action === 'finish') return { ok: true, bytes: 0 };
     if (action === 'direct') return { ok: false, error: 'Preview mode' };
+    if (action === 'log') return { ok: true };
     return { ok: true };
   }
 
@@ -133,9 +136,75 @@
   }
 
   // ---------------------------------------------------------------- upload queue
+  // ---------------------------------------------------------------- upload safety net
+  // Every take is kept on the device (IndexedDB) until Drive confirms it, so a closed tab,
+  // a phone that went to sleep, or a crash never loses an answer: it finishes on the next visit.
+  const STORE = 'fishbowl-pending';
+  function db() {
+    return new Promise((resolve) => {
+      try {
+        const req = indexedDB.open(STORE, 1);
+        req.onupgradeneeded = () => req.result.createObjectStore('takes', { keyPath: 'key' });
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      } catch (e) { resolve(null); }
+    });
+  }
+  async function dbDo(mode, fn) {
+    const d = await db();
+    if (!d) return null;
+    return new Promise((resolve) => {
+      try {
+        const tx = d.transaction('takes', mode);
+        const st = tx.objectStore('takes');
+        const r = fn(st);
+        tx.oncomplete = () => resolve(r && r.result !== undefined ? r.result : true);
+        tx.onerror = () => resolve(null);
+      } catch (e) { resolve(null); }
+    });
+  }
+  const savePending = (item) => {
+    item.key = TOKEN + ':' + item.step.id + ':' + Date.now();
+    return dbDo('readwrite', (st) => st.put({ key: item.key, token: TOKEN, stepId: item.step.id, blob: item.blob, mime: item.mime, ext: item.ext, at: Date.now() }));
+  };
+  const dropPending = (key) => key ? dbDo('readwrite', (st) => st.delete(key)) : null;
+  const listPending = () => dbDo('readonly', (st) => st.getAll());
+
+  /** Re-queues takes from an earlier visit that never finished uploading. */
+  async function resumePending() {
+    const all = ((await listPending()) || []).filter((p) => p.token === TOKEN && p.blob).sort((a, b) => b.at - a.at);
+    let n = 0;
+    all.forEach((p) => {
+      const step = S.steps.find((x) => x.id === p.stepId);
+      if (!step || S.queue.some((q) => q.step.id === step.id)) { dropPending(p.key); return; } // older duplicate
+      S.queue.push({ step, blob: p.blob, mime: p.mime, ext: p.ext, key: p.key, resumed: true });
+      S.done.add(step.id);
+      if (!S.local[step.id]) S.local[step.id] = URL.createObjectURL(p.blob);
+      n++;
+    });
+    if (n) { updatePill(); pump(); }
+    return n;
+  }
+
+  /** Tells the Fishbowl team what went wrong (shows up in the tracker's "Recorder Log" tab). */
+  let logged = 0;
+  function report(stepId, where, err, extra) {
+    if (PREVIEW || logged++ > 25) return;
+    const ua = navigator.userAgent;
+    const device = /iPhone|iPad/.test(ua) ? 'iPhone/iPad' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : 'Other';
+    const browser = /CriOS|Chrome/.test(ua) ? 'Chrome' : /Safari/.test(ua) ? 'Safari' : /Firefox|FxiOS/.test(ua) ? 'Firefox' : 'Other';
+    api('log', Object.assign({ stepId, where, msg: String((err && err.message) || err).slice(0, 300), device, browser,
+      online: navigator.onLine, hidden: document.hidden }, extra || {})).catch(() => {});
+  }
+
+  // ---------------------------------------------------------------- upload queue
   function enqueue(item) {
+    // Re-recording an answer that's still waiting to upload replaces the older take
+    S.queue = S.queue.filter((q, i) => i === 0 && S.uploading ? true : q.step.id !== item.step.id);
     S.queue.push(item);
+    savePending(item);
     updatePill();
+    keepAwake(true);
     pump();
   }
 
@@ -147,72 +216,87 @@
       try {
         await uploadTake(item);
         S.queue.shift();
+        dropPending(item.key);
         S.savedCount++;
         S.pct = -1;
         S.uploadErr = '';
+        S.fails = 0;
       } catch (err) {
         S.uploadErr = err.message || String(err);
+        S.fails = (S.fails || 0) + 1;
         updatePill();
-        await sleep(8000); // keep trying: never drop a take
+        // keep trying (never drop a take), backing off a little, and jump in early if the network returns
+        await new Promise((r) => { const t = setTimeout(r, Math.min(30000, 3000 * S.fails)); S.wake = () => { clearTimeout(t); r(); }; });
+        S.wake = null;
       }
       updatePill();
     }
     S.uploading = false;
     updatePill();
+    keepAwake(false);
     S.waiters.splice(0).forEach((w) => w());
   }
+  window.addEventListener('online', () => S.wake && S.wake());
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && S.wake) S.wake(); });
 
+  /**
+   * Each take tries the fast route (straight to Drive), and if that fails twice in a row,
+   * the backup route (small pieces through the Fishbowl script). It keeps alternating until one works.
+   */
   async function uploadTake(item) {
-    if (S.direct !== false && S.who && S.who.direct) {
-      try {
-        const r = await uploadDirect(item);
-        S.direct = true;
-        return r;
-      } catch (err) {
-        if (S.direct === true) throw err; // it worked before, so this is a hiccup: retry the fast path
-        S.direct = false;                 // never worked here (old backend, blocked network): use pieces
-        console.warn('[fishbowl] direct upload unavailable, using pieces:', err && err.message);
-      }
+    item.tries = (item.tries || 0) + 1;
+    const useDirect = S.who && S.who.direct && S.direct !== false && Math.ceil(item.tries / 2) % 2 === 1; // tries 1-2 fast, 3-4 backup, 5-6 fast…
+    try {
+      const r = useDirect ? await uploadDirect(item) : await uploadChunked(item);
+      if (item.tries > 1 || item.resumed) report(item.step.id, 'ok', 'Saved after ' + item.tries + ' tries' + (item.resumed ? ' (finished on a later visit)' : ''), { size: item.blob.size, attempt: item.tries, route: useDirect ? 'fast' : 'backup' });
+      return r;
+    } catch (err) {
+      report(item.step.id, useDirect ? 'direct' : 'pieces', err, { size: item.blob.size, attempt: item.tries });
+      throw err;
     }
-    return uploadChunked(item);
   }
 
   async function uploadDirect({ step, blob, mime, ext }) {
     const info = { stepId: step.id, title: step.file, mime, ext };
     const s = await withRetry(() => api('direct', Object.assign({ size: blob.size, origin: location.origin }, info)), 2);
     const file = await putToDrive(s.uploadUrl, blob, mime);
-    S.direct = true; // bytes reached Drive, so the fast path works on this network
     return withRetry(() => api('saved', Object.assign({ fileId: file.id, totalSteps: S.steps.length }, info)));
   }
 
+  /** PUTs the take to Drive. Gives up (so the next route can try) if no progress for 45 s. */
   function putToDrive(url, blob, mime) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+      let last = Date.now();
+      const watch = setInterval(() => { if (Date.now() - last > 45000) { clearInterval(watch); xhr.abort(); reject(new Error('Upload stalled')); } }, 5000);
       xhr.open('PUT', url);
       xhr.setRequestHeader('Content-Type', (mime || 'video/webm').split(';')[0]);
-      xhr.upload.onprogress = (e) => { if (e.lengthComputable) { S.pct = Math.round((e.loaded / e.total) * 100); updatePill(); } };
+      xhr.upload.onprogress = (e) => { last = Date.now(); if (e.lengthComputable) { S.pct = Math.round((e.loaded / e.total) * 100); updatePill(); } };
       xhr.onload = () => {
+        clearInterval(watch);
         let json = null;
         try { json = JSON.parse(xhr.responseText); } catch (e) {}
         if (xhr.status >= 200 && xhr.status < 300 && json && json.id) resolve(json);
-        else reject(new Error('Drive responded ' + xhr.status));
+        else reject(new Error('Drive responded ' + xhr.status + ' ' + String(xhr.responseText || '').slice(0, 120)));
       };
-      xhr.onerror = () => reject(new Error('Upload blocked or offline'));
-      xhr.ontimeout = () => reject(new Error('Upload timed out'));
-      xhr.timeout = 10 * 60 * 1000;
+      xhr.onerror = () => { clearInterval(watch); reject(new Error('Upload blocked or offline')); };
+      xhr.onabort = () => { clearInterval(watch); };
       xhr.send(blob);
     });
   }
 
+  /** Base64 of one slice of the blob (slices are a multiple of 3 bytes, so the pieces join cleanly). */
+  function sliceToBase64(blob, start, end) { return blobToBase64(blob.slice(start, end)); }
+
   async function uploadChunked({ step, blob, mime, ext }) {
-    const b64 = await blobToBase64(blob);
-    const total = Math.max(1, Math.ceil(b64.length / CHUNK));
+    const BYTES = (CHUNK / 4) * 3; // 3 MB of video per piece
+    const total = Math.max(1, Math.ceil(blob.size / BYTES));
     const uploadId = step.id + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-    const send = (i) => withRetry(() => api('chunk', { uploadId, index: i, total, data: b64.slice(i * CHUNK, (i + 1) * CHUNK) }));
-    // up to 3 pieces at a time
+    const send = (i) => withRetry(async () => api('chunk', { uploadId, index: i, total, data: await sliceToBase64(blob, i * BYTES, Math.min(blob.size, (i + 1) * BYTES)) }));
+    // two pieces at a time (gentle on phone memory)
     const todo = [...Array(total).keys()];
     let sent = 0;
-    await Promise.all(Array.from({ length: Math.min(3, total) }, async () => {
+    await Promise.all(Array.from({ length: Math.min(2, total) }, async () => {
       while (todo.length) { await send(todo.shift()); S.pct = Math.round((++sent / total) * 90); updatePill(); }
     }));
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -496,25 +580,36 @@
     $('#rec', el).addEventListener('click', () => countIn(step, el));
   }
 
+  // Recording buffers: start a moment before "go" and keep rolling a moment after Stop / time's up,
+  // so first and last words are never clipped. Dead air is trimmed later in Premiere.
+  const PRE_ROLL_MS = 800;
+  const POST_ROLL_MS = 1200;
+
   function countIn(step, el) {
     setAllBtn(false);
+    keepAwake(true);
     const cam = $('#cam', el);
     $('#controls', el).innerHTML = `<button class="btn btn-ghost" disabled>Get ready…</button>`;
     const box = document.createElement('div');
     box.className = 'countin';
     cam.appendChild(box);
-    let n = 3;
+    let n = 3, rec = null;
     const tick = () => {
-      if (S.screen !== 'question') return;
-      if (n === 0) { box.remove(); return record(step, el); }
+      if (S.screen !== 'question') { if (rec && rec.state !== 'inactive') { rec.onstop = null; rec.stop(); } return; }
+      if (n === 0) { box.remove(); return record(step, el, rec); }
       box.innerHTML = `<span>${n}</span>`;
+      if (n === 1) {
+        // Pre-roll: quietly start recording during the last second of the countdown
+        S.timers.push(setTimeout(() => { if (S.screen === 'question') { rec = startRecorder(step); S.rec = rec; } }, Math.max(0, 1000 - PRE_ROLL_MS)));
+      }
       n--;
       S.timers.push(setTimeout(tick, 1000));
     };
     tick();
   }
 
-  function record(step, el) {
+  /** Creates and starts a MediaRecorder (no time slices: Safari drops the last slice when they're used). */
+  function startRecorder(step) {
     S.parts = [];
     let rec;
     try {
@@ -522,12 +617,17 @@
       if (S.mime) opts.mimeType = S.mime;
       rec = new MediaRecorder(S.stream, opts);
     } catch (err) {
-      try { rec = new MediaRecorder(S.stream); S.mime = rec.mimeType || ''; } catch (e) {
-        return errorScreen("Recording isn't working in this browser", 'Please open your link in <b>Chrome</b> or <b>Safari</b> and try again.');
-      }
+      try { rec = new MediaRecorder(S.stream); S.mime = rec.mimeType || ''; } catch (e) { return null; }
     }
-    S.rec = rec;
     rec.ondataavailable = (e) => { if (e.data && e.data.size) S.parts.push(e.data); };
+    try { rec.start(); } catch (e) { return null; }
+    return rec;
+  }
+
+  function record(step, el, rec) {
+    rec = rec || startRecorder(step);
+    if (!rec) return errorScreen("Recording isn't working in this browser", 'Please open your link in <b>Chrome</b> or <b>Safari</b> and try again.');
+    S.rec = rec;
     rec.onstop = () => {
       const type = (rec.mimeType || S.mime || 'video/webm').split(';')[0];
       S.ext = /mp4/.test(type) ? 'mp4' : 'webm';
@@ -537,7 +637,6 @@
       S.blobUrl = URL.createObjectURL(S.blob);
       if (S.screen === 'question') question(step, 'review');
     };
-    rec.start(1000);
 
     const limit = step.seconds * 1000;
     const started = performance.now();
@@ -552,23 +651,44 @@
     S.timers.push(setTimeout(() => { stopBtn.disabled = false; }, step.section === 'splash' ? 600 : 1500));
     stopBtn.addEventListener('click', stop);
 
-    const frame = () => {
+    // A plain interval (not animation frames, which phones pause when the screen dims)
+    let stopping = false;
+    const tickTimer = () => {
       const t = performance.now() - started;
       const left = Math.max(0, limit - t);
-      ring.setAttribute('stroke-dashoffset', String(207.3 * (t / limit)));
+      ring.setAttribute('stroke-dashoffset', String(207.3 * Math.min(1, t / limit)));
       secs.textContent = Math.ceil(left / 1000);
       timer.classList.toggle('low', left < Math.min(5000, limit * 0.3));
-      if (left <= 0) return stop();
-      const id = requestAnimationFrame(frame);
-      S.timers.push(id);
+      if (left <= 0) stop();
     };
-    frame();
+    const iv = setInterval(tickTimer, 100);
+    S.timers.push(iv);
+    tickTimer();
 
     function stop() {
-      if (rec.state !== 'inactive') { try { rec.requestData(); } catch (e) {} rec.stop(); }
-      clearTimers();
+      if (stopping) return;
+      stopping = true;
+      clearInterval(iv);
+      // Post-roll: keep recording a beat so the last word isn't clipped
+      stopBtn.disabled = true;
+      stopBtn.innerHTML = '<span class="rec-dot"></span>Saving the ending…';
+      setTimeout(() => {
+        if (rec.state !== 'inactive') { try { rec.stop(); } catch (e) {} }
+        keepAwake(false);
+      }, POST_ROLL_MS);
     }
   }
+
+  // Keep the phone screen on while recording or uploading (where supported)
+  let wakeLock = null, wakeWanted = false;
+  async function keepAwake(on) {
+    wakeWanted = on || S.queue.length > 0 || S.uploading;
+    try {
+      if (wakeWanted && !wakeLock && navigator.wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); }
+      else if (!wakeWanted && wakeLock) { await wakeLock.release(); wakeLock = null; }
+    } catch (e) { wakeLock = null; }
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && wakeWanted) keepAwake(true); });
 
   function useTake(step) {
     enqueue({ step, blob: S.blob, mime: S.mime, ext: S.ext });
@@ -837,6 +957,7 @@
     }
     (S.who.done || []).forEach((id) => S.done.add(id));
     (S.who.redo || []).forEach((id) => S.redo.add(id));
+    await resumePending();
     if (S.who.received) return doneScreen(true);
     welcome();
   }

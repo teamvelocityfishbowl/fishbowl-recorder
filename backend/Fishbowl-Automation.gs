@@ -1046,6 +1046,7 @@ function recorderApi_(body) {
       case 'direct':   return json_(apiDirect_(who, body));
       case 'saved':    return json_(apiSaved_(who, body));
       case 'clip':     return json_(apiClip_(who, body));
+      case 'log':      return json_(apiLog_(who, body));
       case 'photo':    return json_(apiPhoto_(who, body));
       case 'complete': return json_(apiComplete_(who, body));
       default:         return json_({ ok: false, error: 'Unknown action' });
@@ -1377,6 +1378,26 @@ function sendRedoNotices_(onlyToken) {
       props.deleteProperty(k);
     } catch (err) { /* try again next time */ }
   });
+}
+
+/** Upload problems reported by the recorder page → "Recorder Log" tab (newest at the bottom). */
+function apiLog_(who, b) {
+  try {
+    const ss = SpreadsheetApp.getActive();
+    let log = ss.getSheetByName('Recorder Log');
+    if (!log) {
+      log = ss.insertSheet('Recorder Log', ss.getNumSheets());
+      log.appendRow(['When', 'Tribute', 'Answer', 'Route', 'What happened', 'Device', 'Browser', 'Size (MB)', 'Attempt', 'Online', 'Screen off']);
+      log.getRange(1, 1, 1, 11).setBackground(THEME.NAVY).setFontColor('#FFFFFF').setFontWeight('bold');
+      log.setFrozenRows(1);
+      log.setTabColor('#8A97A0');
+      try { ss.setActiveSheet(getSheet_()); } catch (e) {}
+    }
+    const clean = v => String(v == null ? '' : v).slice(0, 300);
+    log.appendRow([new Date(), who.name, clean(b.stepId), b.where === 'ok' ? 'Saved ✅ (' + clean(b.route) + ')' : b.where === 'direct' ? 'Fast (straight to Drive)' : 'Backup (pieces)', clean(b.msg),
+      clean(b.device), clean(b.browser), b.size ? Math.round(Number(b.size) / 1048576 * 10) / 10 : '', Number(b.attempt) || '', b.online ? 'yes' : 'no', b.hidden ? 'yes' : 'no']);
+  } catch (err) { /* logging must never break uploads */ }
+  return { ok: true };
 }
 
 /** Watch-back: returns one piece (base64) of a saved answer. */
