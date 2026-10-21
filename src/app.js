@@ -186,6 +186,15 @@
     return n;
   }
 
+  /** A short message at the bottom of the screen. */
+  let toastTimer = null;
+  function toast(msg) {
+    let t = document.getElementById('toast');
+    if (!t) { t = document.createElement('div'); t.id = 'toast'; t.className = 'toast'; t.setAttribute('role', 'status'); document.body.appendChild(t); }
+    t.textContent = msg; t.classList.add('on');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('on'), 4500);
+  }
+
   /** Tells the Fishbowl team what went wrong (shows up in the tracker's "Recorder Log" tab). */
   let logged = 0;
   function report(stepId, where, err, extra) {
@@ -734,8 +743,9 @@
           <h2>Add a few photos</h2>
           <p class="small">${esc(S.photosCfg.prompt || 'Family, pets, hobbies, anything fun!')}</p>
           <span class="btn btn-ghost" style="margin-top:6px">Choose photos</span>
-          <input type="file" id="file" accept="image/*" multiple hidden>
+          <input type="file" id="file" accept="image/*,.heic,.heif" multiple hidden>
         </label>
+        <p class="small photo-types">JPG, PNG or iPhone photos (HEIC) all work. Tap ✕ on a photo to remove it.</p>
         <div class="thumbs" id="thumbs"></div>
       </div>
       <div class="panel stagger">
@@ -750,22 +760,40 @@
     const drop = $('#drop', el);
     const thumbs = $('#thumbs', el);
     let photoChain = Promise.resolve();
+    const isPhoto = (f) => /^image\//.test(f.type) || /\.(heic|heif|jpe?g|png|webp)$/i.test(f.name);
     const add = (files) => {
-      [...files].filter((f) => /^image\//.test(f.type) || /\.(heic|heif)$/i.test(f.name)).forEach((file) => {
-        if (S.photos.length >= max) return;
-        const item = { file, state: 'up', url: URL.createObjectURL(file) };
+      const list = [...files];
+      const skipped = list.filter((f) => !isPhoto(f));
+      list.filter(isPhoto).forEach((file) => {
+        if (S.photos.length >= max) { toast(`That's the max of ${max} photos. Remove one to add another.`); return; }
+        const item = { file, state: 'up' };
         S.photos.push(item);
         const div = document.createElement('div');
         div.className = 'thumb';
-        div.innerHTML = `<img alt="" src="${item.url}"><span class="state">…</span>`;
+        div.innerHTML = `<img alt=""><span class="state">…</span><button class="thumb-x" type="button" aria-label="Remove this photo" title="Remove">✕</button>`;
         thumbs.appendChild(div);
         item.el = div;
+        // Preview: browsers that can't show iPhone (HEIC) photos get the converted JPEG once it's ready
+        if (!isHeic(file)) div.querySelector('img').src = URL.createObjectURL(file);
+        div.querySelector('.thumb-x').addEventListener('click', () => removePhoto(item));
         // One photo at a time, in the order they were picked (parallel uploads raced each other)
-        photoChain = photoChain.catch(() => {}).then(() => uploadPhoto(item));
+        photoChain = photoChain.catch(() => {}).then(() => (item.removed ? null : uploadPhoto(item)));
         item.promise = photoChain.then(
-          () => { item.state = 'ok'; div.querySelector('.state').textContent = '✓'; },
-          () => { item.state = 'err'; div.querySelector('.state').textContent = '!'; div.title = 'This photo didn\'t upload'; });
+          (r) => {
+            if (item.removed) { if (r && r.fileId) deletePhoto(r.fileId); return; } // removed while it was uploading
+            if (r && r.fileId) item.fileId = r.fileId;
+            item.state = 'ok'; div.querySelector('.state').textContent = '✓';
+          },
+          (err) => { if (item.removed) return; report('photo', 'photo', err, { size: item.file.size, route: item.file.type || item.file.name.split('.').pop() }); item.state = 'err'; div.querySelector('.state').textContent = '!'; div.title = 'This photo didn\'t upload. Remove it and try again, or try a JPG.'; });
       });
+      if (skipped.length) toast(`${skipped.length === 1 ? 'That file isn\'t' : 'Some files aren\'t'} a photo we can use. Try a JPG, PNG or iPhone photo.`);
+    };
+    const removePhoto = (item) => {
+      item.removed = true;
+      S.photos = S.photos.filter((x) => x !== item);
+      if (item.el) item.el.remove();
+      if (item.fileId) deletePhoto(item.fileId);
+      input.value = ''; // so picking the same photo again works
     };
     input.addEventListener('change', () => add(input.files));
     ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
@@ -773,6 +801,39 @@
     drop.addEventListener('drop', (e) => add(e.dataTransfer.files));
     $('#finish', el).addEventListener('click', finish);
     $('#skip', el).addEventListener('click', finish);
+  }
+
+  function isHeic(file) { return /heic|heif/i.test(file.type) || /\.(heic|heif)$/i.test(file.name); }
+
+  /** iPhone photos (HEIC) → JPEG. Safari decodes them itself; other browsers load a converter only when needed. */
+  let heicLib = null;
+  async function heicToJpeg(file) {
+    try { const bmp = await createImageBitmap(file); return await drawToJpeg(bmp, 2400); } catch (e) { /* not natively supported */ }
+    if (!heicLib) {
+      heicLib = new Promise((resolve, reject) => {
+        const sc = document.createElement('script');
+        sc.src = 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js';
+        sc.onload = () => resolve(window.heic2any);
+        sc.onerror = () => { heicLib = null; reject(new Error('Couldn\'t load the iPhone photo converter')); };
+        document.head.appendChild(sc);
+      });
+    }
+    const conv = await heicLib;
+    const out = await conv({ blob: file, toType: 'image/jpeg', quality: 0.9 });
+    return Array.isArray(out) ? out[0] : out;
+  }
+
+  async function drawToJpeg(bmp, maxDim) {
+    const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * scale);
+    c.height = Math.round(bmp.height * scale);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    return await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.9));
+  }
+
+  function deletePhoto(fileId) {
+    withRetry(() => api('photoDelete', { fileId }), 3).catch((e) => report('photo', 'photoDelete', e));
   }
 
   async function shrinkImage(file, maxDim = 2400) {
@@ -790,9 +851,19 @@
   }
 
   async function uploadPhoto(item) {
-    const blob = await shrinkImage(item.file);
+    let blob;
+    if (isHeic(item.file)) {
+      blob = await heicToJpeg(item.file);
+      if (item.removed) return null;
+      blob = await shrinkImage(blob); // converter output can be huge; resize like any other photo
+      const img = item.el && item.el.querySelector('img');
+      if (img && !img.src) img.src = URL.createObjectURL(blob);
+    } else {
+      blob = await shrinkImage(item.file);
+    }
     const data = await blobToBase64(blob);
-    return withRetry(() => api('photo', { name: item.file.name, mime: blob.type || 'image/jpeg', data }), 4);
+    const name = item.file.name.replace(/\.(heic|heif)$/i, '.jpg');
+    return withRetry(() => api('photo', { name, mime: blob.type || 'image/jpeg', data }), 4);
   }
 
   async function finish() {

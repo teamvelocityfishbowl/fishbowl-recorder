@@ -138,6 +138,7 @@ function onOpen() {
       .addItem('Set up / restyle sheet', 'setupColumns')
       .addItem('Send test invite + emails to me', 'sendTestToMe')
       .addItem('Run diagnostics (email + calendar check)', 'testDiagnostics')
+      .addItem('Connect company email sender…', 'showConnectMailer')
       .addSeparator()
       .addItem('Test: make selected row due for its next reminder', 'testMakeDue'))
     .addToUi();
@@ -513,13 +514,19 @@ function addTribute(data) {
 
 function createInvite_(p) {
   const link = personalLink_(p);
-  const ev = CalendarApp.getDefaultCalendar().createAllDayEvent(
-    '🐟 Fishbowl recording day (about 10 min)', p.day, {
-      description: inviteText_(p, link),
-      location: link,
-      guests: p.email,
-      sendInvites: true,
-    });
+  const title = '🐟 Fishbowl recording day (about 10 min)';
+  if (mailer_()) {
+    try {
+      return callMailer_('event', { event: { title: title, date: Utilities.formatDate(p.day, tz_(), 'yyyy-MM-dd'),
+        description: inviteText_(p, link), location: link, guests: p.email } }).id;
+    } catch (err) { mailerFailed_(err); }
+  }
+  const ev = CalendarApp.getDefaultCalendar().createAllDayEvent(title, p.day, {
+    description: inviteText_(p, link),
+    location: link,
+    guests: p.email,
+    sendInvites: true,
+  });
   return ev.getId();
 }
 
@@ -666,6 +673,13 @@ function testDiagnostics() {
   const user = Session.getEffectiveUser().getEmail();
   lines.push('Script runs as: ' + user);
   lines.push('Admin / reply-to: ' + adminEmail_());
+  const mm = mailer_();
+  if (mm) {
+    try { lines.push('Tribute emails + invites sent from: ' + callMailer_('ping').email + ' ✅'); }
+    catch (err) { lines.push('❌ Company email sender not responding: ' + err.message); }
+    const lastErr = PropertiesService.getScriptProperties().getProperty('MAILER_LAST_ERROR');
+    if (lastErr) lines.push('   Last failed company send (went out from this account instead): ' + lastErr);
+  } else lines.push('Tribute emails + invites sent from: this account (no company sender connected)');
   lines.push('Time zone: ' + tz_());
   try { lines.push('Emails left today: ' + MailApp.getRemainingDailyQuota()); }
   catch (err) { lines.push('❌ Mail quota check failed: ' + err.message); }
@@ -843,7 +857,7 @@ function sendEmail_(p, kind, n, ccManager) {
   const msg = { to: p.email, subject: subject, htmlBody: body + btn + tips, name: CONFIG.SENDER_NAME,
                 replyTo: adminEmail_() };
   if (ccManager) msg.cc = p.manager;
-  MailApp.sendEmail(msg);
+  sendToPerson_(msg);
 }
 
 // ------------------------------------------------------------
@@ -1006,6 +1020,102 @@ function checkSender_(silent) {
 function checkConfig_() {
   if (!/^https?:\/\//.test(CONFIG.RECORDER_URL)) throw new Error('Put the recorder page address into CONFIG.RECORDER_URL first.');
 }
+// ------------------------------------------------------------
+// Company email sender (Fishbowl Mailer): emails to tributes + calendar invites go out from a
+// company Google account so they land in the inbox, not spam. Admin emails still come from here.
+// ------------------------------------------------------------
+function mailer_() {
+  const props = PropertiesService.getScriptProperties();
+  const url = props.getProperty('MAILER_URL'), key = props.getProperty('MAILER_KEY');
+  return url && key ? { url: url, key: key } : null;
+}
+
+function callMailer_(action, payload, override) {
+  const m = override || mailer_();
+  if (!m) throw new Error('No company email sender connected');
+  const res = UrlFetchApp.fetch(m.url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, followRedirects: true,
+    payload: JSON.stringify(Object.assign({ action: action, key: m.key }, payload || {})) });
+  const text = res.getContentText();
+  let j;
+  try { j = JSON.parse(text); } catch (e) {
+    throw new Error(/accounts\.google\.com|Sign in|ServiceLogin/i.test(text)
+      ? 'The mailer asked for a Google sign-in. In the mailer\'s deployment, "Who has access" must be "Anyone" (your company\'s admin settings may only allow "Anyone within Team Velocity").'
+      : 'The mailer sent back something unexpected (HTTP ' + res.getResponseCode() + '). Check its Web app URL.');
+  }
+  if (!j.ok) throw new Error(j.error || 'Mailer error');
+  return j;
+}
+
+/** Emails a tribute (or their manager): through the company sender when connected, otherwise from this account. */
+function sendToPerson_(msg) {
+  if (mailer_()) {
+    try {
+      const m = Object.assign({}, msg);
+      delete m.replyTo; // replies go to the company address it came from
+      callMailer_('mail', { msg: m });
+      return;
+    } catch (err) { mailerFailed_(err); }
+  }
+  MailApp.sendEmail(msg);
+}
+
+/** Remembers a failed company send (diagnostics shows it); the email still goes out from this account. */
+function mailerFailed_(err) {
+  try {
+    PropertiesService.getScriptProperties().setProperty('MAILER_LAST_ERROR',
+      Utilities.formatDate(new Date(), tz_(), 'M/d h:mm a') + ': ' + String(err && err.message || err).slice(0, 300));
+  } catch (e) {}
+}
+
+/** Menu: connect (or disconnect) the company email sender, then send a test through it. */
+function showConnectMailer() {
+  if (!checkSender_()) return;
+  const ui = SpreadsheetApp.getUi();
+  const props = PropertiesService.getScriptProperties();
+  const cur = mailer_();
+  let who = '';
+  if (cur) { try { who = callMailer_('ping').email; } catch (e) { who = '⚠️ not responding: ' + e.message; } }
+  const r = ui.prompt('Connect company email sender',
+    (cur ? 'Currently sending tribute emails + invites from: ' + who + '\n\nPaste a new Fishbowl Mailer URL, or type OFF to go back to sending from this account.'
+         : 'Paste the Fishbowl Mailer\'s Web app URL (it ends in /exec). Setup steps are at the top of Fishbowl-Mailer.gs.'),
+    ui.ButtonSet.OK_CANCEL);
+  if (r.getSelectedButton() !== ui.Button.OK) return;
+  const url = r.getResponseText().trim();
+  if (!url) return;
+  if (/^off$/i.test(url)) {
+    props.deleteProperty('MAILER_URL'); props.deleteProperty('MAILER_KEY'); props.deleteProperty('MAILER_LAST_ERROR');
+    ui.alert('Disconnected. Emails and invites will come from ' + Session.getEffectiveUser().getEmail() + ' again.');
+    return;
+  }
+  if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(url)) { ui.alert('That doesn\'t look like a web app URL. It should start with https://script.google.com/ and end with /exec.'); return; }
+  // Reuse this tracker's key, so connecting again (or retrying after an error) works without a reset
+  let key = props.getProperty('MAILER_KEY') || props.getProperty('MAILER_PENDING_KEY');
+  if (!key) { key = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, ''); props.setProperty('MAILER_PENDING_KEY', key); }
+  let info;
+  try { info = callMailer_('pair', {}, { url: url, key: key }); }
+  catch (err) {
+    ui.alert('Couldn\'t connect', err.message + (/already connected/.test(err.message)
+      ? '\n\nThis happens if the mailer was connected once before with an earlier copy of the tracker. In the Fishbowl Mailer script, pick resetPairing in the function menu, click ▶ Run, then connect again here. (You won\'t need to do this again.)' : ''), ui.ButtonSet.OK);
+    return;
+  }
+  props.setProperty('MAILER_URL', url); props.setProperty('MAILER_KEY', key); props.deleteProperty('MAILER_LAST_ERROR'); props.deleteProperty('MAILER_PENDING_KEY');
+
+  const t = ui.prompt('✅ Connected to ' + info.email,
+    'Tribute emails and calendar invites will now come from ' + info.email + '.\n' +
+    'It only sends to @' + (info.allowed || []).join(', @') + ' addresses, at most ' + info.dailyLimit + ' a day, and logs every send in "Fishbowl Mailer Log" in ' + info.email + '\'s Drive.\n\n' +
+    'Send a test email to check it lands in the inbox? Type a coworker\'s company address (not ' + info.email + ' itself), or leave blank to skip.',
+    ui.ButtonSet.OK_CANCEL);
+  const to = t.getSelectedButton() === ui.Button.OK ? t.getResponseText().trim() : '';
+  if (!to) return;
+  const stamp = Utilities.formatDate(new Date(), tz_(), 'h:mm a');
+  try {
+    callMailer_('mail', { msg: { to: to, name: CONFIG.SENDER_NAME, subject: '🐟 Fishbowl test (' + stamp + ')',
+      htmlBody: '<p>Hi! This is a test of the Fishbowl emails, now sent from <b>' + esc_(info.email) + '</b>.</p>' +
+        '<p>If this landed in your <b>inbox</b> (not spam), we\'re good to go. 🎉</p>' } });
+    ui.alert('Test sent from ' + info.email + ' to ' + to + '. Ask them whether it landed in the inbox or spam.');
+  } catch (err) { ui.alert('Test failed', err.message, ui.ButtonSet.OK); }
+}
+
 function adminEmail_() { return CONFIG.ADMIN_EMAIL || Session.getEffectiveUser().getEmail(); }
 function tz_() { return Session.getScriptTimeZone(); }
 function fmt_(d) { return Utilities.formatDate(d, tz_(), 'EEE M/d'); }
@@ -1048,6 +1158,7 @@ function recorderApi_(body) {
       case 'clip':     return json_(apiClip_(who, body));
       case 'log':      return json_(apiLog_(who, body));
       case 'photo':    return json_(apiPhoto_(who, body));
+      case 'photoDelete': return json_(apiPhotoDelete_(who, body));
       case 'complete': return json_(apiComplete_(who, body));
       default:         return json_({ ok: false, error: 'Unknown action' });
     }
@@ -1488,11 +1599,32 @@ function apiPhoto_(who, b) {
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    let n = 0; const it = photos.getFiles(); while (it.hasNext()) { if (!it.next().isTrashed()) n++; }
+    let n = 0, top = 0; const it = photos.getFiles();
+    while (it.hasNext()) {
+      const f = it.next(); if (f.isTrashed()) continue;
+      n++; const m = f.getName().match(/^(\d+)\s/); if (m) top = Math.max(top, Number(m[1]));
+    }
     if (n >= 12) throw new Error('That\'s plenty of photos, thanks!');
-    const file = photos.createFile(Utilities.newBlob(bytes, mime, ('0' + (n + 1)).slice(-2) + ' ' + base + '.' + ext));
+    const num = Math.max(n, top) + 1; // never repeats the number of a photo still in the folder
+    const file = photos.createFile(Utilities.newBlob(bytes, mime, ('0' + num).slice(-2) + ' ' + base + '.' + ext));
     return { ok: true, fileId: file.getId(), count: n + 1 };
   } finally { lock.releaseLock(); }
+}
+
+/** Removes one of their own photos (moves it to Drive's trash, so it can be recovered for 30 days). */
+function apiPhotoDelete_(who, b) {
+  assertCanRecord_(who, '');
+  const id = String(b.fileId || '');
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(id)) throw new Error('Unknown photo');
+  const photos = photosFolder_(personFolder_(who));
+  let file;
+  try { file = DriveApp.getFileById(id); } catch (e) { return { ok: true }; } // already gone
+  let mine = false;
+  const parents = file.getParents();
+  while (parents.hasNext()) { if (parents.next().getId() === photos.getId()) mine = true; }
+  if (!mine) throw new Error('That photo isn\'t yours to remove');
+  file.setTrashed(true);
+  return { ok: true };
 }
 
 function apiComplete_(who, b) {
@@ -1674,7 +1806,7 @@ function requestRedo(row, ids, note) {
   CacheService.getScriptCache().remove('lock_' + p.token);
   const link = personalLink_(p);
   const items = pick.map(st => '<li><b>' + esc_(st.text || st.file) + '</b></li>').join('');
-  MailApp.sendEmail({ to: p.email, name: CONFIG.SENDER_NAME, replyTo: adminEmail_(),
+  sendToPerson_({ to: p.email, name: CONFIG.SENDER_NAME, replyTo: adminEmail_(),
     subject: '🐟 Quick Fishbowl redo',
     htmlBody: '<p>Hi ' + esc_(p.first) + ',</p><p>Could you re-record ' + (pick.length > 1 ? 'these answers' : 'this answer') +
       ' for your Fishbowl? It only takes a minute.</p><ul>' + items + '</ul>' +
