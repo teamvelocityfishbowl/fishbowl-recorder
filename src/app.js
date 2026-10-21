@@ -759,32 +759,61 @@
     const input = $('#file', el);
     const drop = $('#drop', el);
     const thumbs = $('#thumbs', el);
-    let photoChain = Promise.resolve();
     const isPhoto = (f) => /^image\//.test(f.type) || /\.(heic|heif|jpe?g|png|webp)$/i.test(f.name);
+    const thumb = (item) => {
+      const div = document.createElement('div');
+      div.className = 'thumb';
+      div.innerHTML = `<img alt=""><span class="state">${item.state === 'ok' ? '✓' : item.state === 'err' ? '!' : '…'}</span><button class="thumb-x" type="button" aria-label="Remove this photo" title="Remove">✕</button>`;
+      if (item.url) div.querySelector('img').src = item.url;
+      div.querySelector('.thumb-x').addEventListener('click', () => removePhoto(item));
+      thumbs.appendChild(div);
+      item.el = div;
+      return div;
+    };
+    const setState = (item, st, title) => {
+      item.state = st;
+      if (!item.el) return;
+      item.el.querySelector('.state').textContent = st === 'ok' ? '✓' : st === 'err' ? '!' : '…';
+      if (title) item.el.title = title;
+    };
+    // Photos picked earlier in this visit (still uploading or done)
+    S.photos.forEach(thumb);
+    // Photos saved on an earlier visit: load them from Drive so they can be seen and removed
+    api('photoList').then((r) => {
+      if (S.screen !== 'photos' || !r || !r.photos) return;
+      r.photos.forEach((p) => {
+        if (S.photos.some((x) => x.fileId === p.fileId)) return;
+        const item = { fileId: p.fileId, name: p.name, state: 'ok', saved: true };
+        S.photos.push(item);
+        thumb(item);
+        api('photoThumb', { fileId: p.fileId }).then((t) => {
+          if (!t || !t.data) return;
+          const bin = atob(t.data), bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          item.url = URL.createObjectURL(new Blob([bytes], { type: t.mime || 'image/jpeg' }));
+          const img = item.el && item.el.querySelector('img'); if (img) img.src = item.url;
+        }).catch(() => { if (item.el) item.el.classList.add('no-preview'); });
+      });
+    }).catch((e) => report('photo', 'photoList', e));
     const add = (files) => {
       const list = [...files];
       const skipped = list.filter((f) => !isPhoto(f));
       list.filter(isPhoto).forEach((file) => {
         if (S.photos.length >= max) { toast(`That's the max of ${max} photos. Remove one to add another.`); return; }
         const item = { file, state: 'up' };
-        S.photos.push(item);
-        const div = document.createElement('div');
-        div.className = 'thumb';
-        div.innerHTML = `<img alt=""><span class="state">…</span><button class="thumb-x" type="button" aria-label="Remove this photo" title="Remove">✕</button>`;
-        thumbs.appendChild(div);
-        item.el = div;
         // Preview: browsers that can't show iPhone (HEIC) photos get the converted JPEG once it's ready
-        if (!isHeic(file)) div.querySelector('img').src = URL.createObjectURL(file);
-        div.querySelector('.thumb-x').addEventListener('click', () => removePhoto(item));
+        if (!isHeic(file)) item.url = URL.createObjectURL(file);
+        S.photos.push(item);
+        thumb(item);
         // One photo at a time, in the order they were picked (parallel uploads raced each other)
-        photoChain = photoChain.catch(() => {}).then(() => (item.removed ? null : uploadPhoto(item)));
-        item.promise = photoChain.then(
+        S.photoChain = (S.photoChain || Promise.resolve()).catch(() => {}).then(() => (item.removed ? null : uploadPhoto(item)));
+        item.promise = S.photoChain.then(
           (r) => {
             if (item.removed) { if (r && r.fileId) deletePhoto(r.fileId); return; } // removed while it was uploading
             if (r && r.fileId) item.fileId = r.fileId;
-            item.state = 'ok'; div.querySelector('.state').textContent = '✓';
+            setState(item, 'ok');
           },
-          (err) => { if (item.removed) return; report('photo', 'photo', err, { size: item.file.size, route: item.file.type || item.file.name.split('.').pop() }); item.state = 'err'; div.querySelector('.state').textContent = '!'; div.title = 'This photo didn\'t upload. Remove it and try again, or try a JPG.'; });
+          (err) => { if (item.removed) return; report('photo', 'photo', err, { size: item.file.size, route: item.file.type || item.file.name.split('.').pop() }); setState(item, 'err', 'This photo didn\'t upload. Remove it and try again, or try a JPG.'); });
       });
       if (skipped.length) toast(`${skipped.length === 1 ? 'That file isn\'t' : 'Some files aren\'t'} a photo we can use. Try a JPG, PNG or iPhone photo.`);
     };
@@ -856,8 +885,9 @@
       blob = await heicToJpeg(item.file);
       if (item.removed) return null;
       blob = await shrinkImage(blob); // converter output can be huge; resize like any other photo
+      item.url = URL.createObjectURL(blob);
       const img = item.el && item.el.querySelector('img');
-      if (img && !img.src) img.src = URL.createObjectURL(blob);
+      if (img && !img.src) img.src = item.url;
     } else {
       blob = await shrinkImage(item.file);
     }

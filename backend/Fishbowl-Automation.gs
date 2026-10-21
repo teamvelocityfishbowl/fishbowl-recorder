@@ -1159,6 +1159,8 @@ function recorderApi_(body) {
       case 'log':      return json_(apiLog_(who, body));
       case 'photo':    return json_(apiPhoto_(who, body));
       case 'photoDelete': return json_(apiPhotoDelete_(who, body));
+      case 'photoList':   return json_(apiPhotoList_(who));
+      case 'photoThumb':  return json_(apiPhotoThumb_(who, body));
       case 'complete': return json_(apiComplete_(who, body));
       default:         return json_({ ok: false, error: 'Unknown action' });
     }
@@ -1611,20 +1613,60 @@ function apiPhoto_(who, b) {
   } finally { lock.releaseLock(); }
 }
 
-/** Removes one of their own photos (moves it to Drive's trash, so it can be recovered for 30 days). */
-function apiPhotoDelete_(who, b) {
-  assertCanRecord_(who, '');
-  const id = String(b.fileId || '');
+/** One of their own photos by id, or null if it's gone. Throws if it belongs to someone else. */
+function ownPhoto_(who, fileId) {
+  const id = String(fileId || '');
   if (!/^[A-Za-z0-9_-]{1,200}$/.test(id)) throw new Error('Unknown photo');
   const photos = photosFolder_(personFolder_(who));
   let file;
-  try { file = DriveApp.getFileById(id); } catch (e) { return { ok: true }; } // already gone
+  try { file = DriveApp.getFileById(id); } catch (e) { return null; }
+  if (file.isTrashed()) return null;
   let mine = false;
   const parents = file.getParents();
   while (parents.hasNext()) { if (parents.next().getId() === photos.getId()) mine = true; }
-  if (!mine) throw new Error('That photo isn\'t yours to remove');
-  file.setTrashed(true);
+  if (!mine) throw new Error('That photo isn\'t yours');
+  return file;
+}
+
+/** Removes one of their own photos (moves it to Drive's trash, so it can be recovered for 30 days). */
+function apiPhotoDelete_(who, b) {
+  assertCanRecord_(who, '');
+  const file = ownPhoto_(who, b.fileId);
+  if (file) file.setTrashed(true);
   return { ok: true };
+}
+
+/** The photos they've already added (so a return visit shows them, like saved answers). */
+function apiPhotoList_(who) {
+  const person = personFolder_(who);
+  if (!person.getFoldersByName('Photos').hasNext()) return { ok: true, photos: [] };
+  const out = [];
+  const it = photosFolder_(person).getFiles();
+  while (it.hasNext()) {
+    const f = it.next();
+    if (f.isTrashed() || !/^image\//.test(f.getMimeType())) continue;
+    out.push({ fileId: f.getId(), name: f.getName() });
+  }
+  out.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  return { ok: true, photos: out };
+}
+
+/** A small preview of one of their photos (Drive's thumbnail; the photo itself if that isn't ready yet). */
+function apiPhotoThumb_(who, b) {
+  const file = ownPhoto_(who, b.fileId);
+  if (!file) throw new Error('That photo was removed');
+  try {
+    const token = ScriptApp.getOAuthToken();
+    const meta = JSON.parse(UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + file.getId() + '?fields=thumbnailLink',
+      { headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true }).getContentText());
+    if (meta.thumbnailLink) {
+      const res = UrlFetchApp.fetch(meta.thumbnailLink.replace(/=s\d+$/, '=s480'), { headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
+      const type = String(res.getHeaders()['Content-Type'] || res.getHeaders()['content-type'] || '');
+      if (res.getResponseCode() === 200 && /^image\//.test(type)) return { ok: true, data: Utilities.base64Encode(res.getContent()), mime: type.split(';')[0] };
+    }
+  } catch (err) { /* fall back to the photo itself */ }
+  if (file.getSize() > 6 * 1024 * 1024) throw new Error('Preview not ready yet');
+  return { ok: true, data: Utilities.base64Encode(file.getBlob().getBytes()), mime: file.getMimeType() };
 }
 
 function apiComplete_(who, b) {
