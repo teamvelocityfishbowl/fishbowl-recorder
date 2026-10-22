@@ -150,6 +150,8 @@ function onOpen() {
 function setupColumns() {
   if (!checkSender_()) return;
   styleSheet_();
+  const fixed = repairLinks_();
+  if (fixed.length) SpreadsheetApp.getUi().alert('🐟 Cleaned up leftovers from cleared rows', fixed.join('\n'), SpreadsheetApp.getUi().ButtonSet.OK);
   toast_('Sheet is set up. Add emails, tick the people to invite, then 🐟 Fishbowl → Send invites to ticked rows.');
 }
 
@@ -346,6 +348,7 @@ function sendTestToMe() {
 function sendInvites() {
   checkConfig_();
   if (!checkSender_()) return;
+  repairLinks_();
   const ui = SpreadsheetApp.getUi();
   const sh = getSheet_();
   const all = rows_(sh);
@@ -498,6 +501,8 @@ function addTribute(data) {
     if (data.month) put(COL.MONTH, data.month);
     if (data.date) { const [y, m, d] = String(data.date).split('-').map(Number); put(COL.DATE, new Date(y, m - 1, d)); }
     put(COL.STATUS, STATUS.NOT_INVITED);
+    [COL.SENT, COL.RECEIVED, COL.REMINDERS, COL.LAST, COL.FOLDER, COL.EVENT_ID].forEach(h => { if (map[norm_(h)] !== undefined) sh.getRange(row, map[norm_(h)] + 1).clearContent(); });
+    if (map[norm_(COL.TOKEN)] !== undefined) put(COL.TOKEN, newToken_({ e: norm_(email), n: norm_(name) }));
     SpreadsheetApp.flush();
     // Running low on styled rows? Extend the styling (checkboxes, colors) another 25 rows.
     const styledTo = Number(PropertiesService.getScriptProperties().getProperty('STYLED_TO')) || 0;
@@ -533,7 +538,7 @@ function createInvite_(p) {
 // ------------------------------------------------------------
 // Daily check: day-of nudge, reminders, escalation
 // ------------------------------------------------------------
-function dailyCheck() { stampHeartbeat_(); runCheck_(false); cleanupUploads_(); try { sendRedoNotices_(); } catch (err) {} } // used by the daily trigger
+function dailyCheck() { stampHeartbeat_(); repairLinks_(); runCheck_(false); cleanupUploads_(); try { sendRedoNotices_(); } catch (err) {} } // used by the daily trigger
 function runReminderCheckNow() {          // menu: runs even on weekends, then shows what happened
   if (!checkSender_()) return;
   const report = runCheck_(true);
@@ -868,14 +873,90 @@ function personalLink_(p) {
   return String(CONFIG.RECORDER_URL).replace(/[?#].*$/, '').replace(/\/?$/, '/') + '?t=' + encodeURIComponent(p.token || DEMO_TOKEN);
 }
 
-/** Gives the row a private random token (once) for its recording link. */
+/**
+ * Gives the row a private random token (once) for its recording link.
+ * Each token remembers who it was made for (OWNER_<token>). If a row was cleared and reused for a
+ * new person (different name AND email), the leftover token is replaced, so the new person never
+ * inherits someone else's link, folder, photos or redo requests. Fixing just a typo keeps the link.
+ */
+let ownerCache_ = null;
+/** true if this row's token was made for this row's person (claims unowned tokens for them). */
+function tokenIsTheirs_(t, r) {
+  const me = { e: norm_(r.get(COL.EMAIL)), n: norm_(r.get(COL.NAME)) };
+  const props = PropertiesService.getScriptProperties();
+  if (!ownerCache_) ownerCache_ = props.getProperties();
+  let owner = null;
+  try { owner = JSON.parse(ownerCache_['OWNER_' + t] || 'null'); } catch (e) {}
+  if (owner) return !(owner.e !== me.e && owner.n !== me.n); // a typo fix in one of them is fine
+  if (me.e || me.n) { props.setProperty('OWNER_' + t, JSON.stringify(me)); ownerCache_['OWNER_' + t] = JSON.stringify(me); }
+  return true;
+}
+
 function ensureToken_(r) {
   let t = String(r.get(COL.TOKEN) || '').trim();
+  const me = { e: norm_(r.get(COL.EMAIL)), n: norm_(r.get(COL.NAME)) };
+  if (t && !tokenIsTheirs_(t, r)) { try { CacheService.getScriptCache().remove('who2_' + t); } catch (e) {} t = ''; } // someone else's leftover link
   if (!t) {
-    t = Utilities.getUuid().replace(/-/g, '').slice(0, 22);
+    t = newToken_(me);
     try { r.set(COL.TOKEN, t); } catch (err) { /* column missing until setup runs */ }
   }
   return t;
+}
+
+function newToken_(me) {
+  const t = Utilities.getUuid().replace(/-/g, '').slice(0, 22);
+  PropertiesService.getScriptProperties().setProperty('OWNER_' + t, JSON.stringify(me));
+  if (ownerCache_) ownerCache_['OWNER_' + t] = JSON.stringify(me);
+  return t;
+}
+
+/**
+ * Cleans up after rows that were cleared instead of deleted: leftover link tokens in rows with no
+ * name, and redo requests that no longer match a "Redo requested" row. Runs with the daily check,
+ * Set up / restyle, and before invites go out. Returns what it fixed.
+ */
+function repairLinks_() {
+  const fixed = [];
+  try {
+    const sh = getSheet_();
+    const map = headerMap_(sh);
+    const HR = headerRow_(sh);
+    const tCol = map[norm_(COL.TOKEN)], nCol = map[norm_(COL.NAME)], eCol = map[norm_(COL.EMAIL)], sCol = map[norm_(COL.STATUS)];
+    if (tCol === undefined || nCol === undefined) return fixed;
+    const last = sh.getLastRow();
+    if (last <= HR) return fixed;
+    const vals = sh.getRange(HR + 1, 1, last - HR, sh.getLastColumn()).getValues();
+    const live = {};
+    vals.forEach((v, i) => {
+      const t = String(v[tCol] || '').trim();
+      if (!t) return;
+      const named = String(v[nCol] || '').trim() || (eCol !== undefined && String(v[eCol] || '').trim());
+      if (!named) {
+        sh.getRange(HR + 1 + i, tCol + 1).clearContent();
+        const ev = map[norm_(COL.EVENT_ID)];
+        if (ev !== undefined) sh.getRange(HR + 1 + i, ev + 1).clearContent();
+        fixed.push('Cleared a leftover link in empty row ' + (HR + 1 + i));
+      } else live[t] = String(sCol === undefined ? '' : v[sCol] || '');
+    });
+    // Remember who each current link belongs to, and give a new link to anyone sitting on a leftover one
+    rows_(sh).forEach(r => {
+      const t = String(r.get(COL.TOKEN) || '').trim();
+      if (t && !tokenIsTheirs_(t, r)) { delete live[t]; const nt = ensureToken_(r); live[nt] = String(r.get(COL.STATUS) || ''); fixed.push('Gave ' + r.get(COL.NAME) + ' a new link (row ' + r.row + ' had someone else\'s)'); }
+    });
+    const props = PropertiesService.getScriptProperties();
+    const all = props.getProperties();
+    Object.keys(all).forEach(k => {
+      const m = k.match(/^(REDO|REDONE)_(.+)$/);
+      if (!m) return;
+      const t = m[2];
+      if (!(t in live)) { props.deleteProperty(k); if (m[1] === 'REDO') fixed.push('Removed a redo request for a deleted row'); return; }
+      if (m[1] === 'REDO' && live[t].indexOf('Redo requested') !== 0) {
+        props.deleteProperty(k);
+        fixed.push('Removed a leftover redo request (' + all[k] + ') from a row that never had one');
+      }
+    });
+  } catch (err) { fixed.push('Link check skipped: ' + err.message); }
+  return fixed;
 }
 
 function personFromRow_(r) {
@@ -1177,7 +1258,7 @@ function whoIs_(token) {
   const hit = cache.get('who2_' + token);
   if (hit) return JSON.parse(hit);
   const r = rows_(getSheet_()).find(x => String(x.get(COL.TOKEN) || '').trim() === token);
-  if (!r) return null;
+  if (!r || !tokenIsTheirs_(token, r)) return null; // a leftover link from a cleared row opens nothing
   const name = String(r.get(COL.NAME) || '').trim();
   const who = { token: token, row: r.row, name: name, first: name.split(/\s+/)[0] || 'there',
                 month: monthLabel_(r.get(COL.MONTH)), demo: false };
@@ -1492,10 +1573,11 @@ function trashOtherTakes_(folder, stepId, keepId) {
 function afterTake_(who, folder, stepId, title, replaced, totalSteps) {
   if (who.demo) return;
   const lock = lockState_(who, true);
+  const wanted = redoList_(who);
+  const left = wanted.filter(x => x !== stepId);
+  if (left.length !== wanted.length) setRedoList_(who, left); // recording an answer always clears its redo request
   if (!lock.received) { markProgress_(who, folder, totalSteps); return; }
-  if (!replaced && redoList_(who).indexOf(stepId) === -1) return; // first time this answer was saved
-  const left = redoList_(who).filter(x => x !== stepId);
-  setRedoList_(who, left);
+  if (!replaced && left.length === wanted.length) return; // first time this answer was saved
   const label = stepId + ' ' + title;
   withSheetLock_(sh => {
     const r = rows_(sh).find(x => x.row === who.row);
