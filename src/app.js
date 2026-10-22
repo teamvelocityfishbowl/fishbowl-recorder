@@ -176,7 +176,8 @@
     let n = 0;
     all.forEach((p) => {
       const step = S.steps.find((x) => x.id === p.stepId);
-      if (!step || S.queue.some((q) => q.step.id === step.id)) { dropPending(p.key); return; } // older duplicate
+      const saved = S.who && S.who.takes && S.who.takes[p.stepId];
+      if (!step || S.queue.some((q) => q.step.id === step.id) || (saved && saved.at && saved.at > p.at)) { dropPending(p.key); return; } // older duplicate
       S.queue.push({ step, blob: p.blob, mime: p.mime, ext: p.ext, key: p.key, resumed: true });
       S.done.add(step.id);
       if (!S.local[step.id]) S.local[step.id] = URL.createObjectURL(p.blob);
@@ -208,8 +209,13 @@
 
   // ---------------------------------------------------------------- upload queue
   function enqueue(item) {
+    if (!item.blob || item.blob.size < 1000) { report(item.step.id, 'record', 'Empty recording skipped', { size: item.blob ? item.blob.size : 0 }); return; }
     // Re-recording an answer that's still waiting to upload replaces the older take
-    S.queue = S.queue.filter((q, i) => i === 0 && S.uploading ? true : q.step.id !== item.step.id);
+    S.queue = S.queue.filter((q, i) => {
+      if ((i === 0 && S.uploading) || q.step.id !== item.step.id) return true;
+      dropPending(q.key); // the older take is replaced, so it must never resume on a later visit
+      return false;
+    });
     S.queue.push(item);
     savePending(item);
     updatePill();
@@ -359,13 +365,21 @@
   }
 
   async function startCamera() {
-    if (S.stream && S.stream.active) return S.stream;
+    if (cameraLive()) return S.stream;
+    if (S.stream) stopCamera();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw Object.assign(new Error('unsupported'), { name: 'Unsupported' });
     S.stream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 }, facingMode: 'user' },
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
     return S.stream;
+  }
+
+  /** true while the camera is actually delivering video (phones stop it when the screen locks). */
+  function cameraLive() {
+    if (!S.stream || !S.stream.active) return false;
+    const v = S.stream.getVideoTracks()[0];
+    return !!v && v.readyState === 'live';
   }
 
   function stopCamera() {
@@ -425,7 +439,7 @@
 
   /** Runs fn once the camera is on (shows the camera check first if it isn't). */
   function withCamera(fn) {
-    if (S.stream && S.stream.active) return fn();
+    if (cameraLive()) return fn();
     cameraCheck(fn);
   }
 
@@ -584,9 +598,10 @@
       return;
     }
 
+    if (!cameraLive()) return cameraCheck(() => question(step, 'ready'));
     attachLive(video);
     controls.innerHTML = `<button class="btn btn-rec" id="rec"><span class="rec-dot"></span>Record</button>`;
-    $('#rec', el).addEventListener('click', () => countIn(step, el));
+    $('#rec', el).addEventListener('click', () => (cameraLive() ? countIn(step, el) : cameraCheck(() => question(step, 'ready'))));
   }
 
   // Recording buffers: start a moment before "go" and keep rolling a moment after Stop / time's up,
@@ -644,7 +659,14 @@
       S.blob = new Blob(S.parts, { type });
       if (S.blobUrl) URL.revokeObjectURL(S.blobUrl);
       S.blobUrl = URL.createObjectURL(S.blob);
-      if (S.screen === 'question') question(step, 'review');
+      if (S.screen !== 'question') return;
+      if (S.blob.size < 1000) { // the camera stopped (screen locked, app switched): nothing was captured
+        report(step.id, 'record', 'Recording came out empty', { size: S.blob.size });
+        stopCamera();
+        toast("That one didn't record (the camera paused). Let's try again.");
+        return withCamera(() => question(step, 'ready'));
+      }
+      question(step, 'review');
     };
 
     const limit = step.seconds * 1000;
@@ -810,7 +832,11 @@
         item.promise = S.photoChain.then(
           (r) => {
             if (item.removed) { if (r && r.fileId) deletePhoto(r.fileId); return; } // removed while it was uploading
-            if (r && r.fileId) item.fileId = r.fileId;
+            if (r && r.fileId) {
+              item.fileId = r.fileId;
+              S.photos.filter((x) => x !== item && x.saved && x.fileId === r.fileId).forEach((dup) => { if (dup.el) dup.el.remove(); });
+              S.photos = S.photos.filter((x) => x === item || !(x.saved && x.fileId === r.fileId));
+            }
             setState(item, 'ok');
           },
           (err) => { if (item.removed) return; report('photo', 'photo', err, { size: item.file.size, route: item.file.type || item.file.name.split('.').pop() }); setState(item, 'err', 'This photo didn\'t upload. Remove it and try again, or try a JPG.'); });
@@ -983,7 +1009,8 @@
     if (set) set.addEventListener('click', async () => {
       set.disabled = true; set.textContent = 'Saving…';
       await idle();
-      try { await withRetry(() => api('complete', {}), 4); } catch (e) {}
+      try { await withRetry(() => api('complete', {}), 4); }
+      catch (e) { set.disabled = false; set.textContent = "I'm all set"; $('#footNote', el).textContent = "Couldn't reach the Fishbowl. Check your connection and tap again."; return; }
       stopCamera();
       set.textContent = '✓ All saved';
       $('#footNote', el).textContent = 'Thanks! You can close this tab.';

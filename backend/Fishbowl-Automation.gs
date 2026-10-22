@@ -520,7 +520,7 @@ function addTribute(data) {
 function createInvite_(p) {
   const link = personalLink_(p);
   const title = '🐟 Fishbowl recording day (about 10 min)';
-  if (mailer_()) {
+  if (mailer_() && mailerCanSend_([p.email])) {
     try {
       return callMailer_('event', { event: { title: title, date: Utilities.formatDate(p.day, tz_(), 'yyyy-MM-dd'),
         description: inviteText_(p, link), location: link, guests: p.email } }).id;
@@ -566,12 +566,16 @@ function runCheck_(manual) {
 
   rows_(sh).forEach(r => {
     const who = String(r.get(COL.NAME) || '').trim() || ('Row ' + r.row);
+    try { checkRow_(r, who); } catch (err) { report.skipped.push(who + ': couldn\'t send (' + err.message + ')'); }
+  });
+
+  function checkRow_(r, who) {
     if (r.get(COL.RECEIVED)) return;
     if (!r.get(COL.SENT)) { if (r.get(COL.EMAIL)) report.skipped.push(who + ': not invited yet'); return; }
     if (!r.get(COL.EMAIL)) { report.skipped.push(who + ': no Email'); return; }
     const day = dayOf_(r);
     if (!day) { report.skipped.push(who + ': no Record Date'); return; }
-    const status = String(r.get(COL.STATUS) || '');
+    const status = String(r.get(COL.STATUS) || '').replace(/^Reminder \d+ sent \((\d+)\/(\d+) saved\)$/, 'Recording $1/$2');
     if (status === STATUS.NEEDS_HUMAN) { report.skipped.push(who + ': already flagged "Needs a human"'); return; }
 
     const p = personFromRow_(r);
@@ -611,12 +615,13 @@ function runCheck_(manual) {
     }
     const n = count + 1;
     const cc = n >= CONFIG.CC_MANAGER_FROM_REMINDER && p.manager;
-    sendEmail_(p, 'reminder', n, cc);
+    const part = status.match(/^Recording (\d+)\/(\d+)/);
+    sendEmail_(p, 'reminder', n, cc, part ? { saved: Number(part[1]), total: Number(part[2]) } : null);
     r.set(COL.REMINDERS, n);
     r.set(COL.LAST, now);
-    r.set(COL.STATUS, 'Reminder ' + n + ' sent');
-    report.sent.push(who + ': nudge ' + n + (cc ? ' (manager CC\'d)' : ''));
-  });
+    r.set(COL.STATUS, 'Reminder ' + n + ' sent' + (part ? ' (' + part[1] + '/' + part[2] + ' saved)' : ''));
+    report.sent.push(who + ': nudge ' + n + (cc ? ' (manager CC\'d)' : '') + (part ? ', partway through' : ''));
+  }
 
   if (escalated.length) {
     MailApp.sendEmail({
@@ -680,7 +685,11 @@ function testDiagnostics() {
   lines.push('Admin / reply-to: ' + adminEmail_());
   const mm = mailer_();
   if (mm) {
-    try { lines.push('Tribute emails + invites sent from: ' + callMailer_('ping').email + ' ✅'); }
+    try {
+      const info = callMailer_('ping');
+      if (info.allowed) PropertiesService.getScriptProperties().setProperty('MAILER_DOMAINS', JSON.stringify(info.allowed.map(norm_)));
+      lines.push('Tribute emails + invites sent from: ' + info.email + ' ✅ (company addresses only; anything else comes from this account)');
+    }
     catch (err) { lines.push('❌ Company email sender not responding: ' + err.message); }
     const lastErr = PropertiesService.getScriptProperties().getProperty('MAILER_LAST_ERROR');
     if (lastErr) lines.push('   Last failed company send (went out from this account instead): ' + lastErr);
@@ -822,7 +831,7 @@ function inviteText_(p, link) {
     '• Find a quiet spot with light in front of you, not behind you.',
     '• Splash Round = ONE-WORD answers. Save the stories for the later questions.',
     '• Have 3–6 photos ready to upload (family, pets, hobbies, anything fun).',
-    '• It goes one question at a time, and you can re-record any answer before moving on.',
+    '• It goes one question at a time, and you can watch back and re-record any answer.',
     '• Open the link in Chrome or Safari and allow your camera + microphone.',
     CONFIG.EXTRA_NOTE ? '• ' + CONFIG.EXTRA_NOTE : null,
     '',
@@ -830,7 +839,7 @@ function inviteText_(p, link) {
   ].filter(l => l !== null).join('\n');
 }
 
-function sendEmail_(p, kind, n, ccManager) {
+function sendEmail_(p, kind, n, ccManager, progress) {
   const link = personalLink_(p);
   const btn = '<p><a href="' + link + '" style="background:#14a3a8;color:#fff;padding:12px 22px;' +
     'border-radius:24px;text-decoration:none;font-weight:bold;display:inline-block">▶ Record my Fishbowl</a></p>';
@@ -859,6 +868,12 @@ function sendEmail_(p, kind, n, ccManager) {
       'If something\'s in the way, just reply and let us know.</p>';
   }
 
+  if (progress && kind === 'reminder' && progress.saved > 0) {
+    subject = '🐟 Almost there: finish your Fishbowl';
+    body = '<p>Hi ' + esc_(p.first) + ',</p><p>You\'re partway through your Fishbowl: <b>' + progress.saved + ' of ' + progress.total +
+      '</b> answers are saved. Your link picks up right where you left off, so the rest only takes a few minutes.' +
+      (ccManager ? ' (Looping in your manager so they can help you carve out the time.)' : '') + '</p>';
+  }
   const msg = { to: p.email, subject: subject, htmlBody: body + btn + tips, name: CONFIG.SENDER_NAME,
                 replyTo: adminEmail_() };
   if (ccManager) msg.cc = p.manager;
@@ -950,7 +965,9 @@ function repairLinks_() {
       if (!m) return;
       const t = m[2];
       if (!(t in live)) { props.deleteProperty(k); if (m[1] === 'REDO') fixed.push('Removed a redo request for a deleted row'); return; }
-      if (m[1] === 'REDO' && live[t].indexOf('Redo requested') !== 0) {
+      const st = live[t];
+      const neverRecorded = st === STATUS.NOT_INVITED || st === STATUS.INVITED || st === STATUS.DAY_OF || st === '';
+      if (m[1] === 'REDO' && st.indexOf('Redo requested') !== 0 && (neverRecorded || st === STATUS.RECEIVED)) {
         props.deleteProperty(k);
         fixed.push('Removed a leftover redo request (' + all[k] + ') from a row that never had one');
       }
@@ -1128,8 +1145,17 @@ function callMailer_(action, payload, override) {
 }
 
 /** Emails a tribute (or their manager): through the company sender when connected, otherwise from this account. */
+/** true if every address is one the company sender accepts (it refuses others, e.g. the Fishbowl Gmail). */
+function mailerCanSend_(addrs) {
+  let doms;
+  try { doms = JSON.parse(PropertiesService.getScriptProperties().getProperty('MAILER_DOMAINS') || 'null'); } catch (e) { doms = null; }
+  if (!doms || !doms.length) return true;
+  return String(addrs.filter(Boolean).join(',')).split(/[,;]/).map(a => a.trim()).filter(Boolean)
+    .every(a => doms.indexOf(norm_((a.match(/<([^>]+)>/) || [0, a])[1]).split('@')[1]) !== -1);
+}
+
 function sendToPerson_(msg) {
-  if (mailer_()) {
+  if (mailer_() && mailerCanSend_([msg.to, msg.cc, msg.bcc])) {
     try {
       const m = Object.assign({}, msg);
       delete m.replyTo; // replies go to the company address it came from
@@ -1164,7 +1190,7 @@ function showConnectMailer() {
   const url = r.getResponseText().trim();
   if (!url) return;
   if (/^off$/i.test(url)) {
-    props.deleteProperty('MAILER_URL'); props.deleteProperty('MAILER_KEY'); props.deleteProperty('MAILER_LAST_ERROR');
+    props.deleteProperty('MAILER_URL'); props.deleteProperty('MAILER_KEY'); props.deleteProperty('MAILER_LAST_ERROR'); props.deleteProperty('MAILER_DOMAINS');
     ui.alert('Disconnected. Emails and invites will come from ' + Session.getEffectiveUser().getEmail() + ' again.');
     return;
   }
@@ -1180,6 +1206,7 @@ function showConnectMailer() {
     return;
   }
   props.setProperty('MAILER_URL', url); props.setProperty('MAILER_KEY', key); props.deleteProperty('MAILER_LAST_ERROR'); props.deleteProperty('MAILER_PENDING_KEY');
+  if (info.allowed) props.setProperty('MAILER_DOMAINS', JSON.stringify(info.allowed.map(norm_)));
 
   const t = ui.prompt('✅ Connected to ' + info.email,
     'Tribute emails and calendar invites will now come from ' + info.email + '.\n' +
@@ -1397,7 +1424,7 @@ function savedTakes_(folder) {
     const t = f.getDateCreated().getTime();
     if (!prev || t > prev.t) out[m[1]] = { fileId: f.getId(), size: f.getSize(), mime: f.getMimeType(), name: f.getName(), t: t };
   }
-  Object.keys(out).forEach(k => delete out[k].t);
+  Object.keys(out).forEach(k => { out[k].at = out[k].t; delete out[k].t; });
   return out;
 }
 
@@ -1410,7 +1437,7 @@ function lockState_(who, fresh) {
   const cache = CacheService.getScriptCache();
   const key = 'lock_' + who.token;
   if (!fresh) { const hit = cache.get(key); if (hit) return JSON.parse(hit); }
-  const r = rows_(getSheet_()).find(x => x.row === who.row);
+  const r = rowOf_(getSheet_(), who);
   const received = !!(r && r.get(COL.RECEIVED));
   const end = r ? lockDate_(monthLabel_(r.get(COL.MONTH)), dayOf_(r)) : null;
   const out = {
@@ -1580,7 +1607,7 @@ function afterTake_(who, folder, stepId, title, replaced, totalSteps) {
   if (!replaced && left.length === wanted.length) return; // first time this answer was saved
   const label = stepId + ' ' + title;
   withSheetLock_(sh => {
-    const r = rows_(sh).find(x => x.row === who.row);
+    const r = rowOf_(sh, who);
     if (!r) return;
     const st = String(r.get(COL.STATUS) || '');
     if (st.indexOf('Redo requested') === 0) r.set(COL.STATUS, left.length ? 'Redo requested: ' + left.join(', ') : STATUS.RECEIVED);
@@ -1662,12 +1689,16 @@ function markProgress_(who, folder, totalSteps) {
   const n = savedSteps_(folder).length;
   const total = Number(totalSteps) || 16;
   withSheetLock_(sh => {
-    const r = rows_(sh).find(x => x.row === who.row);
+    const r = rowOf_(sh, who);
     if (r && !r.get(COL.RECEIVED)) {
-      r.set(COL.STATUS, 'Recording ' + Math.min(n, total) + '/' + total);
       if (!r.get(COL.FOLDER)) r.set(COL.FOLDER, folderLink_(folder));
+      if (n >= total) { // every answer is in: done, even if they close the page before tapping Finish
+        r.set(COL.RECEIVED, new Date());
+        r.set(COL.STATUS, STATUS.RECEIVED);
+      } else r.set(COL.STATUS, 'Recording ' + Math.min(n, total) + '/' + total);
     }
   });
+  if (n >= total) CacheService.getScriptCache().remove('lock_' + who.token);
 }
 
 function apiPhoto_(who, b) {
@@ -1756,7 +1787,7 @@ function apiComplete_(who, b) {
   if (who.demo) return { ok: true, folder: folder.getUrl() };
   const done = savedSteps_(folder);
   withSheetLock_(sh => {
-    const r = rows_(sh).find(x => x.row === who.row);
+    const r = rowOf_(sh, who);
     if (!r) return;
     r.set(COL.FOLDER, folderLink_(folder));
     if (!r.get(COL.RECEIVED)) {
@@ -1770,6 +1801,13 @@ function apiComplete_(who, b) {
 }
 
 function folderLink_(folder) { return '=HYPERLINK("' + folder.getUrl() + '","📁 Open")'; }
+
+/** Their row, found by link token (row numbers shift when rows above are deleted). */
+function rowOf_(sh, who) {
+  const t = String(who && who.token || '');
+  if (!t) return null;
+  return rows_(sh).find(x => String(x.get(COL.TOKEN) || '').trim() === t) || null;
+}
 
 function withSheetLock_(fn) {
   const lock = LockService.getScriptLock();
@@ -1803,21 +1841,21 @@ function showRequestRedo() {
 
   // Picks saved by the popup (it couldn't send because Chrome ran it as another account)? Send them now.
   const cache = CacheService.getScriptCache();
-  const saved = cache.get('redoDraft_' + r.row);
+  const saved = cache.get('redoDraft_' + p.token);
   if (saved) {
     const d = JSON.parse(saved);
-    cache.remove('redoDraft_' + r.row);
+    cache.remove('redoDraft_' + p.token);
     const picked = steps.filter(st => d.ids.indexOf(st.id) !== -1).map(st => '• ' + st.id + ' ' + (st.file || st.text)).join('\n');
     const go = ui.alert('Send redo request?', 'To ' + p.name + ' (' + p.email + '):\n\n' + picked +
       (String(d.note || '').trim() ? '\n\nNote: ' + d.note : '') + '\n\nClick No to start over.', ui.ButtonSet.YES_NO);
-    if (go === ui.Button.YES) { const res = requestRedo(r.row, d.ids, d.note); if (!res.ok) ui.alert(res.message); return; }
+    if (go === ui.Button.YES) { const res = requestRedo(r.row, d.ids, d.note, p.token); if (!res.ok) ui.alert(res.message); return; }
   }
 
   const takes = savedTakes_(personFolder_({ token: p.token, name: p.name, month: p.month }));
   const pending = redoList_({ token: p.token });
   // One-time code: lets this popup ask the web app (which always runs as the Fishbowl account) to send.
   const code = Utilities.getUuid();
-  cache.put('redoCode_' + code, String(r.row), 900);
+  cache.put('redoCode_' + code, JSON.stringify({ row: r.row, token: p.token }), 900);
   const items = steps.map(st => `<label class="q"><input type="checkbox" value="${esc_(st.id)}"${pending.indexOf(st.id) !== -1 ? ' checked' : ''}>
       <b>${esc_(st.id)}</b> ${esc_(st.file || st.text)}${takes[st.id] ? '' : ' <span class="none">(not recorded)</span>'}</label>`).join('');
   const html = `<!doctype html><html><head><base target="_top"><style>
@@ -1839,7 +1877,7 @@ function showRequestRedo() {
     <div class="btns"><button class="cancel" onclick="google.script.host.close()">Cancel</button><button class="go" id="go" onclick="send()">Send request</button></div>
     </div>
     <script>
-      const RELAY=${JSON.stringify(CONFIG.WEB_APP_URL)}, CODE=${JSON.stringify(code)}, ROW=${r.row};
+      const RELAY=${JSON.stringify(CONFIG.WEB_APP_URL)}, CODE=${JSON.stringify(code)}, ROW=${r.row}, TOKEN=${JSON.stringify(p.token)};
       function send(){
         const ids=[...document.querySelectorAll('input[type=checkbox]:checked')].map(x=>x.value);
         const note=document.getElementById('note').value;
@@ -1866,7 +1904,7 @@ function showRequestRedo() {
             document.getElementById('form').innerHTML='<div class="next"><b>One more click to send.</b><br>Your picks are saved: close this, then click <b>🐟 Fishbowl → 🔁 Request a redo</b> again (same row) to send them.</div>'+
               '<div class="btns"><button class="go" onclick="google.script.host.close()">Close</button></div>';
           })
-          .withFailureHandler(function(e){go.disabled=false;msg.className='err';msg.textContent=e.message}).submitRedo(ROW, ids, note);
+          .withFailureHandler(function(e){go.disabled=false;msg.className='err';msg.textContent=e.message}).submitRedo(ROW, ids, note, TOKEN);
       }
     </script></body></html>`;
   ui.showModalDialog(HtmlService.createHtmlOutput(html).setWidth(460).setHeight(520), '🔁 Request a redo: ' + p.name);
@@ -1876,11 +1914,12 @@ function showRequestRedo() {
 function webRedo_(b) {
   const code = String(b.code || '').replace(/[^A-Za-z0-9-]/g, '');
   const cache = CacheService.getScriptCache();
-  const row = code ? cache.get('redoCode_' + code) : null;
-  if (!row) return { ok: false, expired: true, message: 'This popup expired. Close it and choose Request a redo again.' };
-  if (Number(row) !== Number(b.row)) return { ok: false, message: 'Row mismatch. Close this and try again.' };
+  const hit = code ? cache.get('redoCode_' + code) : null;
+  if (!hit) return { ok: false, expired: true, message: 'This popup expired. Close it and choose Request a redo again.' };
+  let saved; try { saved = JSON.parse(hit); } catch (e) { saved = { row: Number(hit) }; }
+  if (Number(saved.row) !== Number(b.row)) return { ok: false, message: 'Row mismatch. Close this and try again.' };
   const ids = (Array.isArray(b.ids) ? b.ids : []).map(x => String(x).replace(/[^A-Za-z0-9]/g, '').slice(0, 4));
-  const res = requestRedo(Number(row), ids, String(b.note || '').slice(0, 1000));
+  const res = requestRedo(Number(saved.row), ids, String(b.note || '').slice(0, 1000), saved.token);
   if (res.ok) cache.remove('redoCode_' + code);
   return res;
 }
@@ -1889,14 +1928,14 @@ function webRedo_(b) {
  * Called by the popup. Sends right away when the popup runs as the Fishbowl account; otherwise
  * (Chrome ran it as another signed-in account) saves the picks for 10 minutes so the menu can send them.
  */
-function submitRedo(row, ids, note) {
+function submitRedo(row, ids, note, token) {
   const sender = PropertiesService.getScriptProperties().getProperty('SENDER');
   const me = Session.getEffectiveUser().getEmail();
   if (!sender || norm_(me) === norm_(sender)) {
-    const res = requestRedo(row, ids, note);
+    const res = requestRedo(row, ids, note, token);
     return Object.assign({ sent: !!res.ok }, res);
   }
-  CacheService.getScriptCache().put('redoDraft_' + Number(row), JSON.stringify({ ids: ids, note: String(note || '') }), 600);
+  CacheService.getScriptCache().put('redoDraft_' + String(token || row), JSON.stringify({ ids: ids, note: String(note || '') }), 600);
   return { ok: true, sent: false, as: me || 'another account' };
 }
 
@@ -1914,14 +1953,15 @@ function parseStepIds_(text, steps) {
 }
 
 /** Reopens those answers, updates the row, and emails the tribute. */
-function requestRedo(row, ids, note) {
+function requestRedo(row, ids, note, token) {
   checkSender_(true);
   const steps = questionList_();
   const pick = steps.filter(st => ids.indexOf(st.id) !== -1);
   if (!pick.length) return { ok: false, message: 'Tick at least one answer.' };
   const sh = getSheet_();
-  const r = rows_(sh).find(x => x.row === Number(row));
-  if (!r) return { ok: false, message: 'That row moved. Close this and try again.' };
+  // Find them by their link (rows shift if someone above is deleted while the popup is open)
+  const r = token ? rowOf_(sh, { token: token }) : rows_(sh).find(x => x.row === Number(row));
+  if (!r) return { ok: false, message: 'Couldn\'t find that tribute anymore. Close this and try again.' };
   const p = personFromRow_(r);
   const who = { token: p.token };
   const list = redoList_(who).concat(pick.map(st => st.id)).filter((x, i, a) => a.indexOf(x) === i);
