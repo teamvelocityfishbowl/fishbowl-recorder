@@ -502,6 +502,7 @@ function addTribute(data) {
     if (data.date) { const [y, m, d] = String(data.date).split('-').map(Number); put(COL.DATE, new Date(y, m - 1, d)); }
     put(COL.STATUS, STATUS.NOT_INVITED);
     [COL.SENT, COL.RECEIVED, COL.REMINDERS, COL.LAST, COL.FOLDER, COL.EVENT_ID].forEach(h => { if (map[norm_(h)] !== undefined) sh.getRange(row, map[norm_(h)] + 1).clearContent(); });
+    sh.getRange(row, 1, 1, width).clearNote(); // e.g. an old "re-recorded …" note left on a cleared row
     if (map[norm_(COL.TOKEN)] !== undefined) put(COL.TOKEN, newToken_({ e: norm_(email), n: norm_(name) }));
     SpreadsheetApp.flush();
     // Running low on styled rows? Extend the styling (checkboxes, colors) another 25 rows.
@@ -942,6 +943,13 @@ function repairLinks_() {
     if (last <= HR) return fixed;
     const vals = sh.getRange(HR + 1, 1, last - HR, sh.getLastColumn()).getValues();
     const live = {};
+    if (sCol !== undefined) {
+      const notes = sh.getRange(HR + 1, sCol + 1, last - HR, 1).getNotes();
+      vals.forEach((v, i) => {
+        const named = String(v[nCol] || '').trim() || (eCol !== undefined && String(v[eCol] || '').trim());
+        if (!named && notes[i][0]) { sh.getRange(HR + 1 + i, sCol + 1).clearNote(); fixed.push('Cleared an old note in empty row ' + (HR + 1 + i)); }
+      });
+    }
     vals.forEach((v, i) => {
       const t = String(v[tCol] || '').trim();
       if (!t) return;
@@ -950,13 +958,18 @@ function repairLinks_() {
         sh.getRange(HR + 1 + i, tCol + 1).clearContent();
         const ev = map[norm_(COL.EVENT_ID)];
         if (ev !== undefined) sh.getRange(HR + 1 + i, ev + 1).clearContent();
+        if (sCol !== undefined) sh.getRange(HR + 1 + i, sCol + 1).clearNote();
         fixed.push('Cleared a leftover link in empty row ' + (HR + 1 + i));
       } else live[t] = String(sCol === undefined ? '' : v[sCol] || '');
     });
     // Remember who each current link belongs to, and give a new link to anyone sitting on a leftover one
     rows_(sh).forEach(r => {
       const t = String(r.get(COL.TOKEN) || '').trim();
-      if (t && !tokenIsTheirs_(t, r)) { delete live[t]; const nt = ensureToken_(r); live[nt] = String(r.get(COL.STATUS) || ''); fixed.push('Gave ' + r.get(COL.NAME) + ' a new link (row ' + r.row + ' had someone else\'s)'); }
+      if (t && !tokenIsTheirs_(t, r)) {
+        delete live[t]; const nt = ensureToken_(r); live[nt] = String(r.get(COL.STATUS) || '');
+        if (sCol !== undefined) sh.getRange(r.row, sCol + 1).clearNote();
+        fixed.push('Gave ' + r.get(COL.NAME) + ' a new link (row ' + r.row + ' had someone else\'s)');
+      }
     });
     const props = PropertiesService.getScriptProperties();
     const all = props.getProperties();
